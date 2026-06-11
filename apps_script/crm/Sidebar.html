@@ -1,0 +1,1240 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <base target="_top">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        /* ================================================================
+           VARIABLES DE DISEÑO (SYSTEM DESIGN TOKENS)
+           ================================================================ */
+        :root {
+            --primary: #0f172a;
+            --primary-light: #334155;
+            --accent: #2563eb;
+            --accent-hover: #1d4ed8;
+            --success: #10b981;
+            --success-hover: #059669;
+            --warning: #f59e0b;
+            --error: #ef4444;
+            --bg-color: #f8fafc;
+            --card-bg: #ffffff;
+            --border-color: #e2e8f0;
+            --text-main: #1e293b;
+            --text-muted: #64748b;
+            --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.05);
+            --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        }
+
+        /* ================================================================
+           RESET & BASE STYLES
+           ================================================================ */
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            margin: 0;
+            padding: 16px;
+            font-size: 14px;
+            line-height: 1.5;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        /* ================================================================
+           HEADER PANEL
+           ================================================================ */
+        .header-panel {
+            background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%);
+            color: white;
+            padding: 18px;
+            border-radius: 12px;
+            margin-bottom: 16px;
+            box-shadow: var(--shadow-md);
+            text-align: center;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .header-panel::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: linear-gradient(45deg, transparent 40%, rgba(255, 255, 255, 0.05) 100%);
+            pointer-events: none;
+        }
+
+        .header-phone {
+            font-size: 20px;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+            margin: 0;
+            position: relative;
+            z-index: 1;
+        }
+
+        .header-status {
+            font-size: 11px;
+            font-weight: 600;
+            opacity: 0.95;
+            margin-top: 6px;
+            display: inline-block;
+            background: rgba(255, 255, 255, 0.2);
+            padding: 4px 12px;
+            border-radius: 99px;
+            position: relative;
+            z-index: 1;
+        }
+
+        /* ================================================================
+           CARDS
+           ================================================================ */
+        .card {
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 16px;
+            margin-bottom: 14px;
+            box-shadow: var(--shadow-sm);
+            transition: box-shadow 0.2s;
+        }
+
+        .card:hover {
+            box-shadow: var(--shadow-md);
+        }
+
+        .card-title {
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+            color: var(--text-muted);
+            letter-spacing: 0.05em;
+            margin-bottom: 14px;
+            border-bottom: 2px solid var(--border-color);
+            padding-bottom: 8px;
+            display: flex;
+            align-items: center;
+        }
+
+        .card-title::before {
+            content: '';
+            width: 4px;
+            height: 14px;
+            background: var(--accent);
+            margin-right: 8px;
+            border-radius: 2px;
+        }
+
+        /* ================================================================
+           FORMS
+           ================================================================ */
+        .form-group {
+            margin-bottom: 14px;
+        }
+
+        label {
+            display: block;
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--primary-light);
+            margin-bottom: 5px;
+            text-transform: uppercase;
+            letter-spacing: 0.025em;
+        }
+
+        input,
+        select,
+        textarea {
+            width: 100%;
+            padding: 11px 12px;
+            border: 1.5px solid var(--border-color);
+            border-radius: 8px;
+            font-family: inherit;
+            font-size: 13px;
+            color: var(--text-main);
+            background: #fff;
+            transition: all 0.2s;
+        }
+
+        input:focus,
+        select:focus,
+        textarea:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+        }
+
+        input[readonly] {
+            background-color: #f1f5f9;
+            cursor: default;
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+
+        textarea {
+            resize: vertical;
+            min-height: 70px;
+            font-size: 13px;
+            line-height: 1.5;
+        }
+
+        select {
+            cursor: pointer;
+            appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2364748b' d='M6 9L1 4h10z'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 12px center;
+            padding-right: 36px;
+        }
+
+        /* ================================================================
+           GRID SYSTEM
+           ================================================================ */
+        .grid-2 {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+
+        /* ================================================================
+           BUTTONS
+           ================================================================ */
+        .btn {
+            display: block;
+            width: 100%;
+            padding: 13px 16px;
+            border: none;
+            border-radius: 8px;
+            font-weight: 600;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.2s;
+            text-align: center;
+            font-family: inherit;
+            letter-spacing: 0.025em;
+        }
+
+        .btn-primary {
+            background-color: var(--accent);
+            color: white;
+        }
+
+        .btn-primary:hover:not(:disabled) {
+            background-color: var(--accent-hover);
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
+        }
+
+        .btn-success {
+            background-color: var(--success);
+            color: white;
+            box-shadow: 0 4px 6px -1px rgba(16, 185, 129, 0.25);
+        }
+
+        .btn-success:hover:not(:disabled) {
+            background-color: var(--success-hover);
+            transform: translateY(-2px);
+            box-shadow: 0 6px 16px rgba(16, 185, 129, 0.4);
+        }
+
+        .btn:disabled {
+            background-color: var(--text-muted);
+            cursor: not-allowed;
+            transform: none;
+            opacity: 0.65;
+            box-shadow: none;
+        }
+
+        .btn:active:not(:disabled) {
+            transform: translateY(0);
+        }
+
+        /* ================================================================
+           TIMELINE (HISTORIAL)
+           ================================================================ */
+        .timeline-container {
+            max-height: 320px;
+            overflow-y: auto;
+            padding-right: 6px;
+        }
+
+        .timeline-container::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .timeline-container::-webkit-scrollbar-track {
+            background: var(--bg-color);
+            border-radius: 3px;
+        }
+
+        .timeline-container::-webkit-scrollbar-thumb {
+            background: var(--border-color);
+            border-radius: 3px;
+        }
+
+        .timeline-container::-webkit-scrollbar-thumb:hover {
+            background: var(--text-muted);
+        }
+
+        .timeline-item {
+            position: relative;
+            padding-left: 18px;
+            padding-bottom: 16px;
+            border-left: 2px solid var(--border-color);
+        }
+
+        .timeline-item:last-child {
+            border-left: 2px solid transparent;
+            padding-bottom: 0;
+        }
+
+        .timeline-item::before {
+            content: '';
+            position: absolute;
+            left: -6px;
+            top: 3px;
+            width: 10px;
+            height: 10px;
+            background: var(--accent);
+            border: 2px solid white;
+            border-radius: 50%;
+            box-shadow: 0 0 0 2px var(--border-color);
+        }
+
+        .timeline-item:first-child::before {
+            background: var(--success);
+            box-shadow: 0 0 0 2px var(--success);
+        }
+
+        .t-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 4px;
+        }
+
+        .t-date {
+            font-size: 10px;
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+
+        .t-user {
+            font-size: 10px;
+            color: var(--primary);
+            font-weight: 600;
+            background: var(--bg-color);
+            padding: 2px 8px;
+            border-radius: 4px;
+        }
+
+        .t-result {
+            font-size: 12px;
+            font-weight: 700;
+            color: var(--accent);
+            margin-bottom: 3px;
+        }
+
+        .t-note {
+            font-size: 12px;
+            color: var(--text-main);
+            line-height: 1.5;
+            background: var(--bg-color);
+            padding: 8px 10px;
+            border-radius: 6px;
+            border: 1px solid var(--border-color);
+        }
+
+        /* ================================================================
+           LOADING STATES
+           ================================================================ */
+        .spinner {
+            display: inline-block;
+            width: 14px;
+            height: 14px;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            border-top-color: #fff;
+            animation: spin 0.7s linear infinite;
+            margin-right: 8px;
+            vertical-align: middle;
+        }
+
+        .spinner-dark {
+            border-color: rgba(0, 0, 0, 0.1);
+            border-top-color: var(--accent);
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        /* ================================================================
+           PROGRESS BAR
+           ================================================================ */
+        .progress-bar {
+            width: 100%;
+            height: 3px;
+            background-color: rgba(255, 255, 255, 0.2);
+            border-radius: 2px;
+            overflow: hidden;
+            margin-top: 10px;
+        }
+
+        .progress-bar-fill {
+            height: 100%;
+            background-color: var(--success);
+            animation: progress 1.8s ease-in-out infinite;
+        }
+
+        @keyframes progress {
+            0% {
+                width: 0%;
+            }
+
+            50% {
+                width: 75%;
+            }
+
+            100% {
+                width: 100%;
+            }
+        }
+
+        /* ================================================================
+           ALERTS
+           ================================================================ */
+        .alert {
+            padding: 12px 14px;
+            border-radius: 8px;
+            font-size: 12px;
+            margin-bottom: 12px;
+            border-left: 4px solid;
+            line-height: 1.5;
+        }
+
+        .alert-info {
+            background-color: #dbeafe;
+            border-color: #2563eb;
+            color: #1e40af;
+        }
+
+        .alert-warning {
+            background-color: #fef3c7;
+            border-color: #f59e0b;
+            color: #92400e;
+        }
+
+        .alert-error {
+            background-color: #fee2e2;
+            border-color: #ef4444;
+            color: #991b1b;
+        }
+
+        .alert-success {
+            background-color: #d1fae5;
+            border-color: #10b981;
+            color: #065f46;
+        }
+
+        /* ================================================================
+           EXPANDABLE SECTION
+           ================================================================ */
+        details {
+            margin-top: 8px;
+        }
+
+        summary {
+            font-size: 11px;
+            color: var(--accent);
+            cursor: pointer;
+            font-weight: 600;
+            margin-bottom: 12px;
+            padding: 8px;
+            background: var(--bg-color);
+            border-radius: 6px;
+            border: 1px solid var(--border-color);
+            transition: all 0.2s;
+            user-select: none;
+        }
+
+        summary:hover {
+            background: #e0f2fe;
+            border-color: var(--accent);
+        }
+
+        summary::marker {
+            color: var(--accent);
+        }
+
+        /* ================================================================
+           EMPTY STATE
+           ================================================================ */
+        .empty-state {
+            text-align: center;
+            padding: 30px 20px;
+            color: var(--text-muted);
+            font-style: italic;
+            font-size: 13px;
+        }
+
+        .empty-state::before {
+            content: '📋';
+            display: block;
+            font-size: 32px;
+            margin-bottom: 8px;
+            opacity: 0.5;
+        }
+
+        /* ================================================================
+           UTILITY CLASSES
+           ================================================================ */
+        .text-center {
+            text-align: center;
+        }
+
+        .mt-2 {
+            margin-top: 8px;
+        }
+
+        .mb-2 {
+            margin-bottom: 8px;
+        }
+
+        .hidden {
+            display: none !important;
+        }
+
+        /* ================================================================
+           MODAL SYSTEM
+           ================================================================ */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(15, 23, 42, 0.6);
+            backdrop-filter: blur(4px);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+            animation: modalFadeIn 0.2s ease;
+        }
+
+        .modal-box {
+            background: white;
+            border-radius: 16px;
+            padding: 28px 24px;
+            width: 88%;
+            max-width: 340px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            text-align: center;
+            animation: modalSlideUp 0.3s ease;
+        }
+
+        .modal-icon {
+            font-size: 48px;
+            margin-bottom: 12px;
+            line-height: 1;
+        }
+
+        .modal-title {
+            font-size: 16px;
+            font-weight: 700;
+            color: var(--text-main);
+            margin-bottom: 8px;
+        }
+
+        .modal-message {
+            font-size: 13px;
+            color: var(--text-muted);
+            line-height: 1.6;
+            margin-bottom: 20px;
+        }
+
+        .modal-actions {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+        }
+
+        .modal-btn {
+            padding: 11px 24px;
+            border: none;
+            border-radius: 8px;
+            font-weight: 600;
+            font-size: 13px;
+            cursor: pointer;
+            font-family: inherit;
+            transition: all 0.2s;
+            letter-spacing: 0.02em;
+        }
+
+        .modal-btn-confirm {
+            background: var(--success);
+            color: white;
+        }
+
+        .modal-btn-confirm:hover {
+            background: var(--success-hover);
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(16, 185, 129, 0.35);
+        }
+
+        .modal-btn-cancel {
+            background: var(--bg-color);
+            color: var(--text-muted);
+            border: 1.5px solid var(--border-color);
+        }
+
+        .modal-btn-cancel:hover {
+            background: var(--border-color);
+            color: var(--text-main);
+        }
+
+        .modal-btn-ok {
+            background: var(--accent);
+            color: white;
+        }
+
+        .modal-btn-ok:hover {
+            background: var(--accent-hover);
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(37, 99, 235, 0.35);
+        }
+
+        .modal-btn-error {
+            background: var(--error);
+            color: white;
+        }
+
+        .modal-btn-error:hover {
+            background: #dc2626;
+            transform: translateY(-1px);
+        }
+
+        @keyframes modalFadeIn {
+            from {
+                opacity: 0;
+            }
+
+            to {
+                opacity: 1;
+            }
+        }
+
+        @keyframes modalSlideUp {
+            from {
+                transform: translateY(20px);
+                opacity: 0;
+            }
+
+            to {
+                transform: translateY(0);
+                opacity: 1;
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+    <!-- ================================================================
+         HEADER PANEL
+         ================================================================ -->
+    <div class="header-panel">
+        <h1 class="header-phone" id="displayPhone">
+            <span class="spinner"></span> Inicializando...
+        </h1>
+        <div class="header-status" id="displayStatus">Conectando a base de datos...</div>
+        <div class="progress-bar" id="progressBar" style="display:none;">
+            <div class="progress-bar-fill"></div>
+        </div>
+    </div>
+
+    <!-- ================================================================
+         DEBUG ALERT (Solo visible cuando hay errores)
+         ================================================================ -->
+    <div id="debugAlert" class="hidden"></div>
+
+    <!-- ================================================================
+         FICHA DEL CLIENTE
+         ================================================================ -->
+    <div class="card">
+        <div class="card-title">Ficha del Cliente</div>
+
+        <input type="hidden" id="clientId">
+        <input type="hidden" id="realPhone">
+
+        <div class="form-group">
+            <label>Nombre Completo</label>
+            <input type="text" id="nombre" placeholder="Nombre del prospecto..." autocomplete="off">
+        </div>
+
+        <div class="grid-2">
+            <div class="form-group">
+                <label>Origen</label>
+                <input type="text" id="origen" readonly>
+            </div>
+            <div class="form-group">
+                <label>Email</label>
+                <input type="email" id="email" placeholder="correo@ejemplo.com" autocomplete="off">
+            </div>
+        </div>
+
+        <details>
+            <summary>▶ Ver Perfil Avanzado</summary>
+            <div class="grid-2 mt-2">
+                <div class="form-group">
+                    <label>Estado Civil</label>
+                    <select id="estadoCivil">
+                        <option value="">-- Seleccionar --</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Tiene Pareja</label>
+                    <select id="tienePareja">
+                        <option value="">-- Seleccionar --</option>
+                        <option value="SI">Sí</option>
+                        <option value="NO">No</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Ocupación</label>
+                    <select id="ocupacion">
+                        <option value="">-- Seleccionar --</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Distrito / Zona</label>
+                    <select id="distrito">
+                        <option value="">-- Seleccionar --</option>
+                    </select>
+                </div>
+            </div>
+        </details>
+    </div>
+
+    <!-- ================================================================
+         REGISTRO DE INTERACCIÓN
+         ================================================================ -->
+    <div class="card" style="border-top: 3px solid var(--accent);">
+        <div class="card-title">Registrar Interacción</div>
+
+        <div class="form-group">
+            <label>Resultado de Gestión (Tipificación) *</label>
+            <select id="tipificacion" style="border: 2px solid #bfdbfe;">
+                <option value="" disabled selected>⏳ Cargando opciones...</option>
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label>Notas / Observaciones *</label>
+            <textarea id="notas" rows="3" placeholder="Escribe un resumen detallado de la llamada..."
+                autocomplete="off"></textarea>
+        </div>
+
+        <button id="btnSave" class="btn btn-success" onclick="guardarGestion()" disabled>
+            <span class="spinner"></span> CARGANDO...
+        </button>
+    </div>
+
+    <!-- ================================================================
+         HISTORIAL RECIENTE
+         ================================================================ -->
+    <div class="card">
+        <div class="card-title">📜 Historial Reciente</div>
+        <div id="historialContainer" class="timeline-container">
+            <div class="text-center" style="padding:20px; color:#94a3b8;">
+                <span class="spinner spinner-dark"></span> Cargando historial...
+            </div>
+        </div>
+    </div>
+
+    <!-- ================================================================
+         MODAL OVERLAY
+         ================================================================ -->
+    <div id="modalOverlay" class="modal-overlay hidden">
+        <div class="modal-box">
+            <div class="modal-icon" id="modalIcon"></div>
+            <div class="modal-title" id="modalTitle"></div>
+            <div class="modal-message" id="modalMessage"></div>
+            <div class="modal-actions" id="modalActions"></div>
+        </div>
+    </div>
+
+    <!-- ================================================================
+         JAVASCRIPT
+         ================================================================ -->
+    <script>
+        'use strict';
+
+        // ================================================================
+        // VARIABLES GLOBALES Y CONFIGURACIÓN
+        // ================================================================
+
+        // IMPORTANTE: Sanitización del número recibido del backend
+        const INITIAL_PHONE_RAW = (function () {
+            try {
+                var rawValue = "<?= initialPhone ?>";
+
+                // Validaciones de seguridad
+                if (!rawValue) return "";
+                if (rawValue === "undefined") return "";
+                // Evitar usar scriptlet literal para no romper el template engine de GAS
+                var openTag = "<" + "?=";
+                if (rawValue.indexOf(openTag) !== -1) return "";  // Template no procesado
+                var scriptTag = "<" + "script";
+                if (rawValue.indexOf(scriptTag) !== -1) return "";  // Intento de XSS
+
+                // Limpiar y validar
+                var cleaned = String(rawValue).replace(/\D/g, '');
+
+                // Validar formato peruano: 9 dígitos, empieza con 9
+                if (cleaned.length === 9 && cleaned.charAt(0) === '9') {
+                    return cleaned;
+                }
+
+                return "";
+
+            } catch (e) {
+                console.error('Error al procesar initialPhone:', e);
+                return "";
+            }
+        })();
+
+        const SYSTEM_VERSION = "v5.5";
+        const INITIAL_SHEET_NAME = "<?= initialSheetName ?>";
+        const INITIAL_ROW = Math.max(3, parseInt(<?= initialRow != null ? initialRow : 3 ?>, 10) || 3);
+        let SEARCH_START_TIME = 0;
+        let CONFIG_START_TIME = 0;
+
+        // ================================================================
+        // INICIALIZACIÓN PRINCIPAL
+        // ================================================================
+
+        window.onload = function () {
+            console.log('%c🚀 Sistema CRM ' + SYSTEM_VERSION + ' Iniciado', 'color: #10b981; font-weight: bold; font-size: 14px;');
+            console.log('📞 Teléfono recibido:', INITIAL_PHONE_RAW || '(VACÍO)');
+            console.log('🕐 Timestamp:', new Date().toISOString());
+
+            // Validación crítica del número inyectado
+            if (!INITIAL_PHONE_RAW || INITIAL_PHONE_RAW.length === 0) {
+                console.error('🔴 ERROR CRÍTICO: No se recibió un teléfono válido');
+                mostrarErrorCritico(
+                    'No se detectó un número de celular',
+                    'La celda seleccionada no contiene un número válido.\n\n' +
+                    'Por favor:\n' +
+                    '• Verifica que la columna CELULAR tenga datos\n' +
+                    '• El número debe tener 9 dígitos\n' +
+                    '• Debe empezar con 9'
+                );
+                return;
+            }
+
+            // Mostrar barra de progreso
+            mostrarElemento('progressBar', true);
+
+            // 1. Cargar Configuración (Catálogos)
+            CONFIG_START_TIME = new Date().getTime();
+            console.log('📋 [CONFIG] Solicitando configuración...');
+
+            google.script.run
+                .withSuccessHandler(onConfigLoaded)
+                .withFailureHandler(function (error) {
+                    console.error('🔴 [CONFIG] Error:', error);
+                    mostrarErrorCritico('Error de Configuración', error.message);
+                })
+                .getConfigDropdowns();
+        };
+
+        // ================================================================
+        // CALLBACK: CONFIGURACIÓN CARGADA
+        // ================================================================
+
+        function onConfigLoaded(config) {
+            const configTime = new Date().getTime() - CONFIG_START_TIME;
+            console.log('✅ [CONFIG] Cargada en ' + configTime + 'ms');
+            console.log('📊 [CONFIG] Datos:', config);
+
+            // Llenar dropdowns
+            fillSelect('tipificacion', config.tipificaciones);
+            fillSelect('estadoCivil', config.estadosCiviles);
+            fillSelect('ocupacion', config.ocupaciones);
+            fillSelect('distrito', config.ubicaciones);
+
+            console.log('✅ [CONFIG] Dropdowns poblados | Tipificaciones: ' + config.tipificaciones.length);
+
+            // 2. Buscar Cliente
+            if (INITIAL_PHONE_RAW && INITIAL_PHONE_RAW.length >= 9) {
+                console.log('🔍 [SEARCH] Iniciando búsqueda...');
+
+                setElementText('displayPhone', '🔍 ' + INITIAL_PHONE_RAW);
+                setElementValue('realPhone', INITIAL_PHONE_RAW);
+                setElementText('displayStatus', 'Buscando en base de datos...');
+
+                SEARCH_START_TIME = new Date().getTime();
+
+                google.script.run
+                    .withSuccessHandler(onClientDataReceived)
+                    .withFailureHandler(function (error) {
+                        const searchTime = new Date().getTime() - SEARCH_START_TIME;
+                        console.error('🔴 [SEARCH] Error en ' + searchTime + 'ms:', error);
+                        mostrarAlerta('error', 'Error al buscar: ' + error.message);
+                        mostrarElemento('progressBar', false);
+                    })
+                    .searchClient(INITIAL_PHONE_RAW);
+
+            } else {
+                console.warn('⚠️ [SEARCH] Número inválido');
+                setElementText('displayPhone', 'NÚMERO INVÁLIDO');
+                setElementText('displayStatus', 'Debe tener 9 dígitos');
+                setElementStyle('displayStatus', 'background', '#f59e0b');
+                setElementHTML('historialContainer', '<div class="alert alert-warning">⚠️ El número detectado no es válido.</div>');
+                mostrarElemento('progressBar', false);
+            }
+        }
+
+        // ================================================================
+        // CALLBACK: DATOS DEL CLIENTE RECIBIDOS
+        // ================================================================
+
+        function onClientDataReceived(response) {
+            const searchTime = new Date().getTime() - SEARCH_START_TIME;
+            console.log('✅ [SEARCH] Datos recibidos en ' + searchTime + 'ms');
+            console.log('📊 [SEARCH] Respuesta:', response);
+
+            // Ocultar progreso
+            mostrarElemento('progressBar', false);
+
+            // Habilitar botón de guardado
+            const btn = getElement('btnSave');
+            btn.disabled = false;
+            btn.innerHTML = '💾 GUARDAR GESTIÓN';
+
+            // Métricas de rendimiento
+            if (searchTime > 3000) {
+                console.warn('⚠️ [PERFORMANCE] Búsqueda lenta: ' + searchTime + 'ms');
+                mostrarAlerta('warning', 'Búsqueda completada en ' + searchTime + 'ms. El sistema está bajo carga.');
+            } else if (searchTime > 1500) {
+                console.log('🟡 [PERFORMANCE] Búsqueda aceptable: ' + searchTime + 'ms');
+            } else {
+                console.log('✅ [PERFORMANCE] Búsqueda rápida: ' + searchTime + 'ms');
+            }
+
+            if (response.found) {
+                // Cliente existente
+                const d = response.data;
+
+                setElementText('displayPhone', '📞 ' + d.celular);
+                setElementText('displayStatus', '✅ Cliente: ' + (d.nombre || 'Registrado'));
+                setElementStyle('displayStatus', 'background', '#10b981');
+
+                setElementValue('clientId', d.id);
+                setElementValue('nombre', d.nombre);
+                setElementValue('email', d.email);
+                setElementValue('origen', d.origen);
+                setElementValue('estadoCivil', d.estado_civil);
+                setElementValue('ocupacion', d.ocupacion);
+                setElementValue('tienePareja', d.tiene_pareja);
+                setElementValue('distrito', d.distrito);
+
+                console.log('✅ [UI] Formulario poblado con cliente existente');
+
+            } else {
+                // Cliente nuevo
+                setElementText('displayPhone', '📞 ' + INITIAL_PHONE_RAW);
+                setElementText('displayStatus', '🆕 NUEVO PROSPECTO');
+                setElementStyle('displayStatus', 'background', '#f59e0b');
+
+                const d = response.data;
+                setElementValue('origen', d.origen);
+                setElementValue('clientId', '');
+
+                console.log('📝 [UI] Formulario preparado para nuevo cliente');
+            }
+
+            // Renderizar historial
+            renderHistory(response.history);
+        }
+
+        // ================================================================
+        // RENDERIZAR HISTORIAL
+        // ================================================================
+
+        function renderHistory(history) {
+            const container = getElement('historialContainer');
+
+            console.log('📜 [HISTORY] Renderizando:', history ? history.length : 0, 'registros');
+
+            if (!history || history.length === 0) {
+                container.innerHTML = '<div class="empty-state">Sin interacciones previas</div>';
+                return;
+            }
+
+            let html = '';
+            history.forEach(function (item) {
+                html +=
+                    '<div class="timeline-item">' +
+                    '<div class="t-header">' +
+                    '<span class="t-date">' + escapeHtml(item.fecha) + '</span>' +
+                    '<span class="t-user">' + escapeHtml(item.asesor) + '</span>' +
+                    '</div>' +
+                    '<div class="t-result">' + escapeHtml(item.tipo) + '</div>' +
+                    '<div class="t-note">' + escapeHtml(item.nota) + '</div>' +
+                    '</div>';
+            });
+
+            container.innerHTML = html;
+            console.log('✅ [HISTORY] Historial renderizado');
+        }
+
+        // ================================================================
+        // GUARDAR GESTIÓN (ACCIÓN PRINCIPAL)
+        // ================================================================
+
+        function guardarGestion() {
+            console.log('[SAVE] Iniciando guardado...');
+
+            var tipif = getElementValue('tipificacion');
+            var notas = getElementValue('notas');
+
+            // Validaciones con modal
+            if (!tipif) {
+                showModal('warning', 'Campo Requerido', 'Por favor selecciona un Resultado de Gestión (Tipificación).');
+                return;
+            }
+
+            if (!notas || notas.trim().length < 3) {
+                showModal('warning', 'Nota Requerida', 'Por favor escribe una nota descriptiva (mínimo 3 caracteres).');
+                return;
+            }
+
+            // Modal de confirmación antes de guardar
+            showModal('confirm', 'Confirmar Gestión',
+                'Tipificación: ' + tipif + '\nComentario: ' + notas.trim().substring(0, 60) + (notas.trim().length > 60 ? '...' : ''),
+                function () {
+                    ejecutarGuardado(tipif, notas);
+                }
+            );
+        }
+
+        function ejecutarGuardado(tipif, notas) {
+            var btn = getElement('btnSave');
+            btn.disabled = true;
+            btn.innerHTML = '<span class="spinner"></span> GUARDANDO...';
+
+            var formData = {
+                clientId: getElementValue('clientId'),
+                phone: getElementValue('realPhone'),
+                nombre: getElementValue('nombre') || 'Sin Nombre',
+                email: getElementValue('email'),
+                origen: getElementValue('origen'),
+                tipificacion: tipif,
+                notas: notas.trim(),
+                estadoCivil: getElementValue('estadoCivil'),
+                ocupacion: getElementValue('ocupacion'),
+                tienePareja: getElementValue('tienePareja'),
+                distrito: getElementValue('distrito'),
+                sheetName: INITIAL_SHEET_NAME,
+                row: INITIAL_ROW
+            };
+
+            console.log('[SAVE] Enviando datos:', formData);
+
+            google.script.run
+                .withSuccessHandler(function (res) {
+                    if (res.success) {
+                        showModal('success', 'Gestión Guardada',
+                            res.message || 'Los datos fueron guardados correctamente.');
+                        // Cerrar sidebar automáticamente después de 1.5s
+                        setTimeout(function () {
+                            google.script.host.close();
+                        }, 1500);
+                    } else {
+                        showModal('error', 'Error al Guardar',
+                            res.message || 'Ocurrió un error inesperado.');
+                        btn.disabled = false;
+                        btn.innerHTML = '🔄 REINTENTAR';
+                    }
+                })
+                .withFailureHandler(function (err) {
+                    showModal('error', 'Error de Conexión',
+                        'No se pudo conectar con el servidor: ' + err.message);
+                    btn.disabled = false;
+                    btn.innerHTML = '❌ ERROR - REINTENTAR';
+                })
+                .saveInteraction(formData);
+        }
+
+        // ================================================================
+        // FUNCIONES DE UTILIDAD
+        // ================================================================
+
+        function fillSelect(id, items) {
+            const select = getElement(id);
+            const placeholder = select.options[0];
+            select.innerHTML = '';
+            if (placeholder) select.appendChild(placeholder);
+
+            if (items && Array.isArray(items)) {
+                items.forEach(function (item) {
+                    const option = document.createElement('option');
+                    option.value = item;
+                    option.text = item;
+                    select.appendChild(option);
+                });
+            }
+        }
+
+        function getElement(id) {
+            return document.getElementById(id);
+        }
+
+        function getElementValue(id) {
+            var el = getElement(id);
+            return el ? el.value : '';
+        }
+
+        function setElementValue(id, value) {
+            var el = getElement(id);
+            if (el && value !== undefined && value !== null) {
+                el.value = value;
+            }
+        }
+
+        function setElementText(id, text) {
+            var el = getElement(id);
+            if (el) el.innerText = text;
+        }
+
+        function setElementHTML(id, html) {
+            var el = getElement(id);
+            if (el) el.innerHTML = html;
+        }
+
+        function setElementStyle(id, property, value) {
+            var el = getElement(id);
+            if (el) el.style[property] = value;
+        }
+
+        function mostrarElemento(id, visible) {
+            var el = getElement(id);
+            if (el) el.style.display = visible ? 'block' : 'none';
+        }
+
+        function mostrarAlerta(type, message) {
+            const alertDiv = getElement('debugAlert');
+            let className = 'alert alert-info';
+            let icon = 'ℹ️';
+
+            if (type === 'warning') {
+                className = 'alert alert-warning';
+                icon = '⚠️';
+            } else if (type === 'error') {
+                className = 'alert alert-error';
+                icon = '🔴';
+            } else if (type === 'success') {
+                className = 'alert alert-success';
+                icon = '✅';
+            }
+
+            alertDiv.className = className;
+            alertDiv.innerHTML = icon + ' ' + escapeHtml(message);
+            alertDiv.classList.remove('hidden');
+
+            setTimeout(function () {
+                alertDiv.classList.add('hidden');
+            }, 8000);
+        }
+
+        function mostrarErrorCritico(titulo, mensaje) {
+            setElementText('displayPhone', '❌ ' + titulo);
+            setElementText('displayStatus', 'ERROR DEL SISTEMA');
+            setElementStyle('displayStatus', 'background', '#ef4444');
+
+            mostrarAlerta('error', mensaje);
+            mostrarElemento('progressBar', false);
+
+            const btn = getElement('btnSave');
+            btn.disabled = true;
+            btn.innerHTML = '❌ NO DISPONIBLE';
+        }
+
+        // ================================================================
+        // SISTEMA DE MODALES
+        // ================================================================
+
+        function showModal(type, title, message, onConfirm) {
+            var overlay = getElement('modalOverlay');
+            var iconEl = getElement('modalIcon');
+            var titleEl = getElement('modalTitle');
+            var messageEl = getElement('modalMessage');
+            var actionsEl = getElement('modalActions');
+
+            titleEl.textContent = title;
+            messageEl.textContent = message;
+
+            if (type === 'confirm') {
+                iconEl.textContent = '🤔';
+                actionsEl.innerHTML =
+                    '<button class="modal-btn modal-btn-cancel" onclick="closeModal()">Cancelar</button>' +
+                    '<button class="modal-btn modal-btn-confirm" id="modalConfirmBtn">Confirmar</button>';
+                getElement('modalConfirmBtn').onclick = function () {
+                    closeModal();
+                    if (onConfirm) onConfirm();
+                };
+            } else if (type === 'success') {
+                iconEl.textContent = '✅';
+                actionsEl.innerHTML =
+                    '<button class="modal-btn modal-btn-confirm" onclick="closeModal()">OK</button>';
+            } else if (type === 'error') {
+                iconEl.textContent = '❌';
+                actionsEl.innerHTML =
+                    '<button class="modal-btn modal-btn-error" onclick="closeModal()">Entendido</button>';
+            } else if (type === 'warning') {
+                iconEl.textContent = '⚠️';
+                actionsEl.innerHTML =
+                    '<button class="modal-btn modal-btn-ok" onclick="closeModal()">Entendido</button>';
+            }
+
+            overlay.classList.remove('hidden');
+        }
+
+        function closeModal() {
+            getElement('modalOverlay').classList.add('hidden');
+        }
+
+        function escapeHtml(text) {
+            if (!text) return '';
+            var div = document.createElement('div');
+            div.textContent = String(text);
+            return div.innerHTML;
+        }
+
+        // ================================================================
+        // MANEJO DE ERRORES GLOBAL
+        // ================================================================
+
+        window.addEventListener('error', function (e) {
+            console.error('🔴 [GLOBAL ERROR]', e.message, e.filename, e.lineno);
+            mostrarAlerta('error', 'Error JavaScript: ' + e.message + ' (Línea ' + e.lineno + ')');
+        });
+
+        console.log('%c✅ Sistema de logs activado', 'color: #10b981; font-weight: bold;');
+    </script>
+</body>
+
+</html>

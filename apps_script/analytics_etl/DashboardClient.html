@@ -1,0 +1,1288 @@
+<script>
+(function () {
+  var state = {
+    payload: null,
+    charts: {},
+    activeModule: 'commercial',
+    refreshTimer: null,
+    refreshDeadline: 0
+  };
+
+  var moduleConfig = {
+    executive: { title: 'Resumen Ejecutivo', eyebrow: 'Lectura de conversion, demanda y riesgos del periodo', mode: 'COHORTE', tipoFecha: 'CAPTACION' },
+    commercial: { title: 'Comercial', eyebrow: 'Embudo comercial, equipo, distritos y fuentes', mode: 'COHORTE', tipoFecha: 'CAPTACION' },
+    marketing: { title: 'Marketing', eyebrow: 'Adquisicion desde leads, calidad por fuente y zonas de demanda', mode: 'COHORTE', tipoFecha: 'CAPTACION' },
+    callcenter: { title: 'Call Center', eyebrow: 'Gestion, contactabilidad, tipificaciones y seguimiento', mode: 'EVENTO', tipoFecha: 'GESTION' },
+    alertas: { title: 'Alertas', eyebrow: 'Riesgos accionables detectados en el pipeline', mode: 'COHORTE', tipoFecha: 'CAPTACION' },
+    calidad: { title: 'Calidad ETL', eyebrow: 'Cobertura, limpieza y trazabilidad del modelo', mode: 'COHORTE', tipoFecha: 'CAPTACION' }
+  };
+
+  var tipoFechaOptions = ['CAPTACION', 'ASIGNACION', 'GESTION', 'CITA', 'PRESENCIA', 'TOUR', 'SEPARACION', 'PROCESABLE', 'TODOS'];
+  var funnelStages = [
+    ['Leads', 'totalLeads'],
+    ['Contactables', 'contactables'],
+    ['Potenciales', 'potenciales'],
+    ['Citas reales', 'citas'],
+    ['Presencias', 'presencias'],
+    ['Tours validos', 'tours'],
+    ['Separaciones', 'separaciones'],
+    ['Procesables', 'procesables']
+  ];
+  var noDistrict = { 'NO ESPECIFICADO': true, 'SIN_DISTRITO': true, 'SIN DISTRITO': true, 'SIN_DATO': true, '': true };
+
+  document.addEventListener('DOMContentLoaded', init);
+
+  function init() {
+    bindEvents();
+    activateModule('commercial', true);
+    loadPayload();
+  }
+
+  function bindEvents() {
+    el('applyBtn').addEventListener('click', applyFilters);
+    el('clearBtn').addEventListener('click', clearFilters);
+    el('refreshBtn').addEventListener('click', requestDataRefresh);
+    el('mode').addEventListener('change', handleModeChange);
+    el('tipoFecha').addEventListener('change', syncModeLabels);
+    document.querySelectorAll('.nav-item').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        activateModule(btn.dataset.module);
+        applyFilters({ silent: true });
+      });
+    });
+  }
+
+  function loadPayload(options) {
+    options = options || {};
+    showBusy(true, options.title || 'Cargando datos', options.sub || 'Leyendo payload publicado');
+    google.script.run
+      .withSuccessHandler(function (raw) {
+        try {
+          var payload = typeof raw === 'string' ? JSON.parse(raw) : raw;
+          applyPayload(payload);
+          if (options.toast !== false) toast(options.message || 'Dashboard listo.');
+        } catch (err) {
+          showError(err);
+        } finally {
+          showBusy(false);
+        }
+      })
+      .withFailureHandler(function (err) {
+        showError(err);
+        showBusy(false);
+      })
+      .getDashboardPayload();
+  }
+
+  function applyPayload(payload, options) {
+    if (!payload || payload.ok === false) {
+      throw new Error(payload && (payload.message || payload.error) ? (payload.message || payload.error) : 'No se pudo cargar el payload.');
+    }
+    options = options || {};
+    var savedFilters = options.preserveFilters && state.payload ? readFilters() : null;
+    state.payload = payload;
+    enrichPayload(payload);
+    hydrateFilters(payload);
+    if (savedFilters) restoreFilters(savedFilters);
+    activateModule(state.activeModule || 'commercial', true);
+    setSyncStatus(payload);
+    applyFilters({ silent: true });
+  }
+
+  function restoreFilters(filters) {
+    ['mode', 'tipoFecha', 'fuente', 'proyecto', 'distrito', 'agente', 'etapa', 'tipificacion'].forEach(function (id) {
+      var node = el(id);
+      if (node && filters[id] != null) setSelectIfExists(id, filters[id]);
+    });
+    if (filters.dateStart) el('dateStart').value = filters.dateStart;
+    if (filters.dateEnd) el('dateEnd').value = filters.dateEnd;
+    syncModeLabels();
+  }
+
+  function setSelectIfExists(id, selected) {
+    var node = el(id);
+    for (var i = 0; i < node.options.length; i++) {
+      if (String(node.options[i].value) === String(selected)) {
+        node.value = selected;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function requestDataRefresh() {
+    if (state.refreshTimer) window.clearTimeout(state.refreshTimer);
+    var previous = payloadStamp(state.payload);
+    state.refreshDeadline = Date.now() + 7 * 60 * 1000;
+    showBusy(true, 'Actualizando datos', 'Ejecutando ETL rapido y esperando payload nuevo');
+    google.script.run
+      .withSuccessHandler(function (result) {
+        if (!result || result.ok === false) {
+          showBusy(false);
+          showError(new Error(result && result.error ? result.error : 'No se pudo programar la actualizacion.'));
+          return;
+        }
+        pollFreshPayload(previous, 0);
+      })
+      .withFailureHandler(function (err) {
+        showError(err);
+        showBusy(false);
+      })
+      .actualizarDashboardWeb();
+  }
+
+  function pollFreshPayload(previousStamp, attempt) {
+    var waitMs = attempt < 2 ? 6000 : 12000;
+    state.refreshTimer = window.setTimeout(function () {
+      google.script.run
+        .withSuccessHandler(function (raw) {
+          try {
+            var payload = typeof raw === 'string' ? JSON.parse(raw) : raw;
+            var current = payloadStamp(payload);
+            if (current && current !== previousStamp) {
+              state.refreshTimer = null;
+              applyPayload(payload, { preserveFilters: true });
+              showBusy(false);
+              toast('Datos actualizados con el ultimo payload.');
+              return;
+            }
+            if (Date.now() >= state.refreshDeadline) {
+              state.refreshTimer = null;
+              if (payload && payload.ok !== false) applyPayload(payload, { preserveFilters: true });
+              showBusy(false);
+              toast('El refresh sigue en proceso. Se muestra el ultimo payload disponible.');
+              return;
+            }
+            el('loadingSub').textContent = 'Esperando nueva publicacion del ETL (' + Math.round((Date.now() - (state.refreshDeadline - 7 * 60 * 1000)) / 1000) + 's)';
+            pollFreshPayload(previousStamp, attempt + 1);
+          } catch (err) {
+            showError(err);
+            showBusy(false);
+          }
+        })
+        .withFailureHandler(function (err) {
+          showError(err);
+          showBusy(false);
+        })
+        .getDashboardPayload();
+    }, waitMs);
+  }
+
+  function payloadStamp(payload) {
+    if (!payload) return '';
+    return String(payload.snapshotGeneratedAt || payload.generatedAt || '') + '|' +
+      String(payload.counts && payload.counts.events || 0) + '|' +
+      String(payload.counts && payload.counts.leads || 0);
+  }
+
+  function handleModeChange() {
+    if (value('mode') === 'EVENTO' && value('tipoFecha') === 'CAPTACION') {
+      el('tipoFecha').value = 'GESTION';
+    }
+    syncModeLabels();
+    applyFilters();
+  }
+
+  function syncModeLabels() {
+    var label = el('dateBaseLabel');
+    if (label) label.textContent = value('mode') === 'EVENTO' ? 'Tipo de evento' : 'Fecha base';
+  }
+
+  function enrichPayload(payload) {
+    var data = payload.data || {};
+    (data.leads || []).forEach(function (l) {
+      l.et = stageOfLead(l);
+    });
+    (data.events || []).forEach(function (r) {
+      r.et = stageOfEvent(r);
+    });
+    payload.derivedCatalogs = buildDerivedCatalogs(data);
+  }
+
+  function hydrateFilters(payload) {
+    var catalogs = payload.catalogs || {};
+    var derived = payload.derivedCatalogs || {};
+    fillSelect('tipoFecha', tipoFechaOptions, (payload.defaults && payload.defaults.tipoFecha) || 'CAPTACION', false);
+    fillSelect('fuente', mergeValues(catalogs.FUENTE, derived.fuente), 'TODOS', true);
+    fillSelect('proyecto', mergeValues(catalogs.PROYECTO, derived.proyecto), 'TODOS', true);
+    fillSelect('distrito', mergeValues(catalogs.DISTRITO, derived.distrito), 'TODOS', true);
+    fillSelect('agente', derived.agente, 'TODOS', true);
+    fillSelect('etapa', derived.etapa, 'TODOS', true);
+    fillSelect('tipificacion', mergeValues(catalogs.TIPIFICACION, derived.tipificacion), 'TODOS', true);
+    el('dateStart').value = (payload.defaults && payload.defaults.dateStart) || firstDayOfMonth();
+    el('dateEnd').value = (payload.defaults && payload.defaults.dateEnd) || todayKey();
+    el('dateStart').max = todayKey();
+    el('dateEnd').max = todayKey();
+    syncModeLabels();
+  }
+
+  function activateModule(module, keepFilters) {
+    state.activeModule = module || 'commercial';
+    var cfg = moduleConfig[state.activeModule] || moduleConfig.commercial;
+    document.querySelectorAll('.nav-item').forEach(function (btn) {
+      btn.classList.toggle('active', btn.dataset.module === state.activeModule);
+    });
+    el('viewTitle').textContent = cfg.title;
+    el('viewEyebrow').textContent = cfg.eyebrow;
+    if (!keepFilters) {
+      el('mode').value = cfg.mode;
+      el('tipoFecha').value = cfg.tipoFecha;
+    } else {
+      if (!el('mode').value) el('mode').value = cfg.mode;
+      if (!el('tipoFecha').value) el('tipoFecha').value = cfg.tipoFecha;
+    }
+    syncModeLabels();
+    refreshIcons();
+  }
+
+  function clearFilters() {
+    if (!state.payload) return;
+    hydrateFilters(state.payload);
+    var cfg = moduleConfig[state.activeModule] || moduleConfig.commercial;
+    el('mode').value = cfg.mode;
+    el('tipoFecha').value = cfg.tipoFecha;
+    syncModeLabels();
+    applyFilters();
+  }
+
+  function applyFilters(options) {
+    options = options || {};
+    if (!state.payload || !state.payload.data) {
+      renderEmptyShell('Sin datos disponibles', 'Publica el payload web del dashboard desde el ETL.');
+      return;
+    }
+    if (!options.silent) showBusy(true, 'Aplicando filtros', 'Calculando en navegador');
+    window.setTimeout(function () {
+      try {
+        destroyCharts();
+        var calc = computeDashboard(readFilters());
+        render(calc);
+      } catch (err) {
+        showError(err);
+      } finally {
+        if (!options.silent) showBusy(false);
+      }
+    }, options.silent ? 0 : 25);
+  }
+
+  function readFilters() {
+    return {
+      mode: value('mode') || 'COHORTE',
+      tipoFecha: value('tipoFecha') || 'CAPTACION',
+      dateStart: value('dateStart'),
+      dateEnd: value('dateEnd'),
+      fuente: value('fuente'),
+      proyecto: value('proyecto'),
+      distrito: value('distrito'),
+      agente: value('agente'),
+      etapa: value('etapa'),
+      tipificacion: value('tipificacion')
+    };
+  }
+
+  function computeDashboard(filters) {
+    var data = state.payload.data || {};
+    var isEvento = String(filters.mode || '').toUpperCase() === 'EVENTO';
+    var leads = filterLeads(data.leads || [], filters);
+    var allEvents = filterEvents(data.events || [], merge({}, filters, { tipoFecha: 'TODOS' }));
+    var gestionEvents = filterEvents(data.events || [], merge({}, filters, { tipoFecha: 'GESTION' }));
+    var typedEvents = filterEvents(data.events || [], filters);
+    var eventRows = (filters.tipoFecha && filters.tipoFecha !== 'TODOS') ? typedEvents : allEvents;
+    var kpis = isEvento ? calcEventKpis(eventRows, filters.tipoFecha) : calcLeadKpis(leads);
+    var callKpis = isEvento ? calcCallCenterKpisFromEvents(allEvents, gestionEvents) : calcCallCenterKpis(leads, gestionEvents);
+    var sourceQuality = isEvento ? calcSourceQualityFromEvents(eventRows, filters.tipoFecha) : calcSourceQuality(leads);
+    var districts = (isEvento ? groupEvents(eventRows, 'di', filters.tipoFecha) : groupLeads(leads, 'di', 'total'))
+      .filter(function (r) { return !noDistrict[String(r.label || '').toUpperCase()]; });
+    var advisors = isEvento ? calcAdvisorPerformanceFromEvents(eventRows, filters.tipoFecha) : calcAdvisorPerformance(leads);
+    var tipifs = (isEvento ? groupEvents(eventRows, 'ti', filters.tipoFecha) : groupLeads(leads, 'ti', 'total')).slice(0, 12);
+    var funnel = buildFunnel(kpis);
+    var alerts = isEvento ? calcEventAlerts(kpis, funnel, sourceQuality, districts, filters) : calcAlerts(leads, funnel, sourceQuality, districts);
+    var mainTrend = isEvento ? rowsToTrend(eventRows) : rowsToLeadTrend(leads);
+    return {
+      filters: filters,
+      leads: leads,
+      events: allEvents,
+      typedEvents: typedEvents,
+      gestionEvents: gestionEvents,
+      eventRows: eventRows,
+      kpis: kpis,
+      callKpis: callKpis,
+      funnel: funnel,
+      callFunnel: buildCallFunnel(callKpis),
+      trend: isEvento ? mainTrend : rowsToTrend(allEvents),
+      gestionTrend: rowsToTrend(gestionEvents),
+      leadTrend: mainTrend,
+      sourceQuality: sourceQuality,
+      districtDemand: districts,
+      advisorPerf: advisors,
+      tipifs: tipifs,
+      sla: isEvento ? calcSlaFromEvents(allEvents, gestionEvents) : calcSla(leads),
+      followups: isEvento ? calcFollowupsFromEvents(gestionEvents) : calcFollowups(leads),
+      alerts: alerts,
+      quality: isEvento ? calcEventQuality(eventRows) : calcQuality(leads)
+    };
+  }
+
+  function filterLeads(leads, f) {
+    return leads.filter(function (l) {
+      if (!l.crm) return false;
+      if (!dateInRange(dateForLead(l, f.tipoFecha), f.dateStart, f.dateEnd)) return false;
+      return passDims(l, f);
+    });
+  }
+
+  function filterEvents(events, f) {
+    return events.filter(function (r) {
+      if (!dateInRange(r.f, f.dateStart, f.dateEnd)) return false;
+      if (f.tipoFecha && f.tipoFecha !== 'TODOS' && r.tf !== f.tipoFecha) return false;
+      return passDims(r, f);
+    });
+  }
+
+  function passDims(r, f) {
+    if (!match(r.fu, f.fuente)) return false;
+    if (!match(r.py, f.proyecto)) return false;
+    if (!match(r.di, f.distrito)) return false;
+    if (!matchAny([r.as, r.op], f.agente)) return false;
+    if (!match(r.et || stageOfEvent(r), f.etapa)) return false;
+    if (!match(r.ti, f.tipificacion)) return false;
+    return true;
+  }
+
+  function calcLeadKpis(rows) {
+    var out = baseKpis();
+    out.totalLeads = rows.length;
+    rows.forEach(function (r) {
+      out.contactables += r.co ? 1 : 0;
+      out.potenciales += r.po ? 1 : 0;
+      out.citas += r.ci ? 1 : 0;
+      out.presencias += r.pp ? 1 : 0;
+      out.tours += r.to ? 1 : 0;
+      out.separaciones += r.se ? 1 : 0;
+      out.procesables += r.pr ? 1 : 0;
+    });
+    return attachRates(out);
+  }
+
+  function calcEventKpis(rows, tipoFecha) {
+    var out = baseKpis();
+    rows.forEach(function (r) {
+      out.totalLeads += eventBaseMetric(r, tipoFecha);
+      out.contactables += num(r.co);
+      out.potenciales += num(r.po);
+      out.citas += num(r.ci);
+      out.presencias += num(r.pp);
+      out.tours += num(r.to);
+      out.separaciones += num(r.se);
+      out.procesables += num(r.pr);
+    });
+    return attachRates(out);
+  }
+
+  function eventBaseMetric(r, tipoFecha) {
+    var tf = String((tipoFecha && tipoFecha !== 'TODOS') ? tipoFecha : (r && r.tf) || '').toUpperCase();
+    if (tf === 'CAPTACION') return num(r.l);
+    if (tf === 'ASIGNACION') return num(r.ag);
+    if (tf === 'GESTION') return num(r.ge);
+    if (tf === 'CITA') return num(r.ci);
+    if (tf === 'PRESENCIA') return num(r.pp);
+    if (tf === 'TOUR') return num(r.to);
+    if (tf === 'SEPARACION') return num(r.se);
+    if (tf === 'PROCESABLE') return num(r.pr);
+    return num(r.l) + num(r.ag) + num(r.ge) + num(r.ci) + num(r.pp) + num(r.to) + num(r.se) + num(r.pr);
+  }
+
+  function eventBaseLabel(tipoFecha) {
+    var tf = String(tipoFecha || '').toUpperCase();
+    if (tf === 'ASIGNACION') return 'Asignaciones';
+    if (tf === 'GESTION') return 'Gestiones';
+    if (tf === 'CITA') return 'Citas reales';
+    if (tf === 'PRESENCIA') return 'Presencias';
+    if (tf === 'TOUR') return 'Tours validos';
+    if (tf === 'SEPARACION') return 'Separaciones';
+    if (tf === 'PROCESABLE') return 'Procesables';
+    if (tf === 'TODOS') return 'Eventos';
+    return 'Leads captados';
+  }
+
+  function calcCallCenterKpis(leads, gestionEvents) {
+    var asignados = leads.filter(function (l) { return l.ae === 'ASIGNADO'; }).length;
+    var gestionados = leads.filter(function (l) { return !!l.fg || !!l.ti; }).length;
+    var contactables = leads.filter(function (l) { return l.co; }).length;
+    var potenciales = leads.filter(function (l) { return l.po; }).length;
+    var citas = leads.filter(function (l) { return l.ci; }).length;
+    var confirmadas = leads.filter(function (l) { return String(l.ti || '') === 'CITA CONFIRMADA'; }).length;
+    var gestiones = gestionEvents.reduce(function (s, r) { return s + num(r.ge); }, 0);
+    var pendientes = leads.filter(isFollowup).length;
+    var firstGestionDays = average(leads.filter(function (l) { return l.fc && l.fg; }).map(function (l) { return Math.max(0, daysBetween(l.fc, l.fg)); }));
+    return {
+      asignados: asignados,
+      gestionados: gestionados,
+      contactables: contactables,
+      potenciales: potenciales,
+      citas: citas,
+      confirmadas: confirmadas,
+      pendientes: pendientes,
+      gestiones: gestiones || gestionados,
+      contactRate: div(contactables, gestionados || asignados || leads.length),
+      noContactRate: 1 - div(contactables, gestionados || asignados || leads.length),
+      intentosPromedio: div(gestiones || gestionados, gestionados || asignados || leads.length),
+      primeraGestionDias: firstGestionDays || 0
+    };
+  }
+
+  function calcCallCenterKpisFromEvents(allEvents, gestionEvents) {
+    var asignados = sumEvents(allEvents, 'ag');
+    var gestionados = sumEvents(gestionEvents, 'ge');
+    var contactables = sumEvents(gestionEvents, 'co');
+    var potenciales = sumEvents(gestionEvents, 'po');
+    var citas = sumEvents(allEvents, 'ci');
+    var confirmadas = gestionEvents.reduce(function (s, r) {
+      return s + (String(r.ti || '') === 'CITA CONFIRMADA' ? num(r.ge) : 0);
+    }, 0);
+    var pendientes = gestionEvents.reduce(function (s, r) {
+      return s + (isFollowupEvent(r) ? num(r.ge) : 0);
+    }, 0);
+    return {
+      asignados: asignados,
+      gestionados: gestionados,
+      contactables: contactables,
+      potenciales: potenciales,
+      citas: citas,
+      confirmadas: confirmadas,
+      pendientes: pendientes,
+      gestiones: gestionados,
+      contactRate: div(contactables, gestionados || asignados),
+      noContactRate: 1 - div(contactables, gestionados || asignados),
+      intentosPromedio: div(gestionados, asignados || gestionados),
+      primeraGestionDias: 0
+    };
+  }
+
+  function baseKpis() {
+    return { totalLeads: 0, contactables: 0, potenciales: 0, citas: 0, presencias: 0, tours: 0, separaciones: 0, procesables: 0 };
+  }
+
+  function attachRates(out) {
+    out.leadToCita = div(out.citas, out.totalLeads);
+    out.leadToSeparacion = div(out.separaciones, out.totalLeads);
+    out.leadToProcesable = div(out.procesables, out.totalLeads);
+    out.contactRate = div(out.contactables, out.totalLeads);
+    out.potentialRate = div(out.potenciales, out.contactables || out.totalLeads);
+    out.citaToTour = div(out.tours, out.citas);
+    out.tourToSep = div(out.separaciones, out.tours);
+    return out;
+  }
+
+  function buildFunnel(k) {
+    return funnelStages.map(function (stage, idx) {
+      var value = num(k[stage[1]]);
+      var previous = idx ? num(k[funnelStages[idx - 1][1]]) : value;
+      return { label: stage[0], key: stage[1], value: value, rate: idx ? div(value, previous) : 1, totalRate: div(value, k.totalLeads) };
+    });
+  }
+
+  function buildCallFunnel(k) {
+    var stages = [
+      ['Asignados', k.asignados],
+      ['Gestionados', k.gestionados],
+      ['Contactados', k.contactables],
+      ['Potenciales', k.potenciales],
+      ['Citas agendadas', k.citas],
+      ['Confirmadas', k.confirmadas]
+    ];
+    return stages.map(function (s, i) {
+      var prev = i ? stages[i - 1][1] : s[1];
+      return { label: s[0], value: s[1], rate: i ? div(s[1], prev) : 1, totalRate: div(s[1], stages[0][1]) };
+    });
+  }
+
+  function rowsToTrend(rows) {
+    var map = {};
+    rows.forEach(function (r) {
+      if (!r.f) return;
+      if (!map[r.f]) map[r.f] = { date: r.f, leads: 0, asignaciones: 0, gestiones: 0, citas: 0, presencias: 0, tours: 0, separaciones: 0, procesables: 0, contactables: 0 };
+      map[r.f].leads += num(r.l);
+      map[r.f].asignaciones += num(r.ag);
+      map[r.f].gestiones += num(r.ge);
+      map[r.f].citas += num(r.ci);
+      map[r.f].presencias += num(r.pp);
+      map[r.f].tours += num(r.to);
+      map[r.f].separaciones += num(r.se);
+      map[r.f].procesables += num(r.pr);
+      map[r.f].contactables += num(r.co);
+    });
+    return Object.keys(map).sort().map(function (k) { return map[k]; });
+  }
+
+  function eventTrendKey(tipoFecha) {
+    var tf = String(tipoFecha || '').toUpperCase();
+    if (tf === 'ASIGNACION') return 'asignaciones';
+    if (tf === 'GESTION') return 'gestiones';
+    if (tf === 'CITA') return 'citas';
+    if (tf === 'PRESENCIA') return 'presencias';
+    if (tf === 'TOUR') return 'tours';
+    if (tf === 'SEPARACION') return 'separaciones';
+    if (tf === 'PROCESABLE') return 'procesables';
+    return 'leads';
+  }
+
+  function rowsToLeadTrend(leads) {
+    var map = {};
+    leads.forEach(function (l) {
+      if (!l.fc) return;
+      if (!map[l.fc]) map[l.fc] = { date: l.fc, leads: 0, contactables: 0, citas: 0, tours: 0, separaciones: 0, procesables: 0 };
+      map[l.fc].leads++;
+      map[l.fc].contactables += l.co ? 1 : 0;
+      map[l.fc].citas += l.ci ? 1 : 0;
+      map[l.fc].tours += l.to ? 1 : 0;
+      map[l.fc].separaciones += l.se ? 1 : 0;
+      map[l.fc].procesables += l.pr ? 1 : 0;
+    });
+    return Object.keys(map).sort().map(function (k) { return map[k]; });
+  }
+
+  function calcSourceQuality(leads) {
+    var map = {};
+    leads.forEach(function (l) {
+      var key = l.fu || 'SIN_FUENTE';
+      if (!map[key]) map[key] = { label: key, leads: 0, contactables: 0, potenciales: 0, citas: 0, tours: 0, separaciones: 0, procesables: 0 };
+      map[key].leads++;
+      map[key].contactables += l.co ? 1 : 0;
+      map[key].potenciales += l.po ? 1 : 0;
+      map[key].citas += l.ci ? 1 : 0;
+      map[key].tours += l.to ? 1 : 0;
+      map[key].separaciones += l.se ? 1 : 0;
+      map[key].procesables += l.pr ? 1 : 0;
+    });
+    return Object.keys(map).map(function (k) {
+      var r = map[k];
+      r.contactRate = div(r.contactables, r.leads);
+      r.leadToCita = div(r.citas, r.leads);
+      r.tourRate = div(r.tours, r.leads);
+      r.quality = Math.round((r.leadToCita * 55 + div(r.potenciales, r.leads) * 30 + r.tourRate * 15) * 100);
+      return r;
+    }).sort(function (a, b) { return b.leads - a.leads; });
+  }
+
+  function calcSourceQualityFromEvents(rows, tipoFecha) {
+    var map = {};
+    rows.forEach(function (r) {
+      var key = r.fu || 'SIN_FUENTE';
+      if (!map[key]) map[key] = { label: key, leads: 0, contactables: 0, potenciales: 0, citas: 0, tours: 0, separaciones: 0, procesables: 0 };
+      map[key].leads += eventBaseMetric(r, tipoFecha);
+      map[key].contactables += num(r.co);
+      map[key].potenciales += num(r.po);
+      map[key].citas += num(r.ci);
+      map[key].tours += num(r.to);
+      map[key].separaciones += num(r.se);
+      map[key].procesables += num(r.pr);
+    });
+    return Object.keys(map).map(function (k) {
+      var r = map[k];
+      r.contactRate = div(r.contactables, r.leads);
+      r.leadToCita = div(r.citas, r.leads);
+      r.tourRate = div(r.tours, r.leads);
+      r.quality = Math.round((r.leadToCita * 55 + div(r.potenciales, r.leads) * 30 + r.tourRate * 15) * 100);
+      return r;
+    }).sort(function (a, b) { return b.leads - a.leads; });
+  }
+
+  function calcAdvisorPerformance(leads) {
+    var map = {};
+    leads.forEach(function (l) {
+      var key = l.as || l.op || 'SIN_ASESOR';
+      if (!map[key]) map[key] = { label: key, leads: 0, contactables: 0, citas: 0, tours: 0, separaciones: 0, procesables: 0, gestionados: 0 };
+      map[key].leads++;
+      map[key].contactables += l.co ? 1 : 0;
+      map[key].citas += l.ci ? 1 : 0;
+      map[key].tours += l.to ? 1 : 0;
+      map[key].separaciones += l.se ? 1 : 0;
+      map[key].procesables += l.pr ? 1 : 0;
+      map[key].gestionados += l.fg ? 1 : 0;
+    });
+    return Object.keys(map).map(function (k) {
+      var r = map[k];
+      r.contactRate = div(r.contactables, r.leads);
+      r.citaRate = div(r.citas, r.leads);
+      r.closeRate = div(r.separaciones + r.procesables, r.leads);
+      return r;
+    }).sort(function (a, b) { return b.citas + b.tours + b.separaciones - (a.citas + a.tours + a.separaciones); });
+  }
+
+  function calcAdvisorPerformanceFromEvents(rows, tipoFecha) {
+    var map = {};
+    rows.forEach(function (r) {
+      var key = r.as || r.op || 'SIN_ASESOR';
+      if (!map[key]) map[key] = { label: key, leads: 0, contactables: 0, citas: 0, tours: 0, separaciones: 0, procesables: 0, gestionados: 0 };
+      map[key].leads += eventBaseMetric(r, tipoFecha);
+      map[key].contactables += num(r.co);
+      map[key].citas += num(r.ci);
+      map[key].tours += num(r.to);
+      map[key].separaciones += num(r.se);
+      map[key].procesables += num(r.pr);
+      map[key].gestionados += num(r.ge);
+    });
+    return Object.keys(map).map(function (k) {
+      var r = map[k];
+      r.contactRate = div(r.contactables, r.gestionados || r.leads);
+      r.citaRate = div(r.citas, r.leads || r.gestionados);
+      r.closeRate = div(r.separaciones + r.procesables, r.leads || r.gestionados);
+      return r;
+    }).sort(function (a, b) { return b.gestionados + b.citas + b.tours + b.separaciones - (a.gestionados + a.citas + a.tours + a.separaciones); });
+  }
+
+  function calcSla(leads) {
+    return {
+      sinGestion: leads.filter(function (l) { return !l.fg && !l.ti; }).length,
+      criticos: leads.filter(function (l) { return (l.po || l.ci) && !l.to && !l.se && !l.pr; }).length,
+      seguimientos: leads.filter(isFollowup).length,
+      datoFalso: leads.filter(function (l) { return l.ti === 'DATO FALSO' || l.ti === 'FUERA DE SERVICIO'; }).length
+    };
+  }
+
+  function calcSlaFromEvents(allEvents, gestionEvents) {
+    var asignados = sumEvents(allEvents, 'ag');
+    var gestionados = sumEvents(gestionEvents, 'ge');
+    var potenciales = sumEvents(gestionEvents, 'po');
+    var citas = sumEvents(allEvents, 'ci');
+    return {
+      sinGestion: Math.max(0, asignados - gestionados),
+      criticos: Math.max(0, potenciales - citas),
+      seguimientos: gestionEvents.reduce(function (s, r) { return s + (isFollowupEvent(r) ? num(r.ge) : 0); }, 0),
+      datoFalso: gestionEvents.reduce(function (s, r) { return s + num(r.df); }, 0)
+    };
+  }
+
+  function calcFollowups(leads) {
+    var buckets = [
+      { label: '0 - 24 horas', min: 0, max: 1, value: 0 },
+      { label: '24 - 48 horas', min: 1, max: 2, value: 0 },
+      { label: '48 - 72 horas', min: 2, max: 3, value: 0 },
+      { label: 'Mas de 72 horas', min: 3, max: 999, value: 0 }
+    ];
+    leads.filter(isFollowup).forEach(function (l) {
+      var age = daysBetween(l.fg || l.fc, todayKey());
+      buckets.forEach(function (b) { if (age >= b.min && age < b.max) b.value++; });
+    });
+    return buckets;
+  }
+
+  function calcFollowupsFromEvents(gestionEvents) {
+    var total = gestionEvents.reduce(function (s, r) { return s + (isFollowupEvent(r) ? num(r.ge) : 0); }, 0);
+    return [
+      { label: 'Gestionados hoy', min: 0, max: 1, value: total },
+      { label: '24 - 48 horas', min: 1, max: 2, value: 0 },
+      { label: '48 - 72 horas', min: 2, max: 3, value: 0 },
+      { label: 'Mas de 72 horas', min: 3, max: 999, value: 0 }
+    ];
+  }
+
+  function calcQuality(leads) {
+    return {
+      total: leads.length,
+      sinDistrito: leads.filter(function (l) { return noDistrict[String(l.di || '').toUpperCase()]; }).length,
+      sinAsesor: leads.filter(function (l) { return !l.as && !l.op; }).length,
+      sinTipificacion: leads.filter(function (l) { return !l.ti || l.ti === 'SIN_TIPIFICACION'; }).length
+    };
+  }
+
+  function calcEventQuality(rows) {
+    var total = rows.reduce(function (s, r) { return s + eventBaseMetric(r, 'TODOS'); }, 0);
+    return {
+      total: total,
+      sinDistrito: rows.reduce(function (s, r) { return s + (noDistrict[String(r.di || '').toUpperCase()] ? eventBaseMetric(r, 'TODOS') : 0); }, 0),
+      sinAsesor: rows.reduce(function (s, r) { return s + (!r.as && !r.op ? eventBaseMetric(r, 'TODOS') : 0); }, 0),
+      sinTipificacion: rows.reduce(function (s, r) { return s + (!r.ti || r.ti === 'SIN_TIPIFICACION' || r.ti === 'TODAS' ? eventBaseMetric(r, 'TODOS') : 0); }, 0)
+    };
+  }
+
+  function calcAlerts(leads, funnel, sources, districts) {
+    var alerts = [];
+    var k = calcLeadKpis(leads);
+    var leak = biggestLeak(funnel);
+    if (leak && leak.lost > 0) alerts.push({ type: 'danger', title: 'Mayor fuga: ' + leak.from + ' a ' + leak.to, body: fmtNum(leak.lost) + ' leads no avanzan. Conversion de etapa: ' + pct(leak.rate) + '.' });
+    if (k.totalLeads && k.contactRate < 0.45) alerts.push({ type: 'warn', title: 'Contactabilidad bajo el 45%', body: 'Tasa actual: ' + pct(k.contactRate) + '. Revisar horarios, asignacion y calidad del telefono.' });
+    var topSource = bestSource(sources);
+    if (topSource) alerts.push({ type: 'good', title: topSource.label + ' tiene mejor calidad', body: 'Lead a cita: ' + pct(topSource.leadToCita) + ' con ' + fmtNum(topSource.leads) + ' leads.' });
+    var topDistrict = districts[0];
+    if (topDistrict) alerts.push({ type: 'good', title: topDistrict.label + ' concentra demanda valida', body: fmtNum(topDistrict.value) + ' leads con distrito identificado.' });
+    if (!alerts.length) alerts.push({ type: 'good', title: 'Sin alertas criticas', body: 'No se detectan caidas fuertes en el filtro actual.' });
+    return alerts;
+  }
+
+  function calcEventAlerts(k, funnel, sources, districts, filters) {
+    var alerts = [];
+    var label = eventBaseLabel(filters.tipoFecha || 'TODOS').toLowerCase();
+    var leak = biggestLeak(funnel);
+    if (!k.totalLeads) {
+      alerts.push({ type: 'warn', title: 'Sin actividad para el filtro', body: 'No hay ' + label + ' en el rango seleccionado. Prueba Tipo de evento = Gestion para actividad del call center.' });
+      return alerts;
+    }
+    if (leak && leak.lost > 0) alerts.push({ type: 'warn', title: 'Fuga operativa: ' + leak.from + ' a ' + leak.to, body: fmtNum(leak.lost) + ' eventos no avanzan en el rango.' });
+    if (k.contactables && k.contactRate < 0.45) alerts.push({ type: 'warn', title: 'Contactabilidad baja en evento real', body: 'Tasa actual: ' + pct(k.contactRate) + '.' });
+    var topSource = bestSource(sources);
+    if (topSource) alerts.push({ type: 'good', title: topSource.label + ' lidera el periodo', body: fmtNum(topSource.leads) + ' ' + label + ' con lead a cita de ' + pct(topSource.leadToCita) + '.' });
+    var topDistrict = districts[0];
+    if (topDistrict) alerts.push({ type: 'good', title: topDistrict.label + ' concentra actividad', body: fmtNum(topDistrict.value) + ' eventos con distrito identificado.' });
+    if (!alerts.length) alerts.push({ type: 'good', title: 'Actividad estable', body: 'No se detectan alertas fuertes en evento real.' });
+    return alerts;
+  }
+
+  function render(calc) {
+    if (state.activeModule === 'marketing') return renderMarketing(calc);
+    if (state.activeModule === 'callcenter') return renderCallCenter(calc);
+    if (state.activeModule === 'alertas') return renderAlertsModule(calc);
+    if (state.activeModule === 'calidad') return renderQuality(calc);
+    return renderCommercial(calc, state.activeModule === 'executive');
+  }
+
+  function renderCommercial(calc, executive) {
+    var eventMode = String(calc.filters.mode || '').toUpperCase() === 'EVENTO';
+    var baseLabel = eventMode ? eventBaseLabel(calc.filters.tipoFecha) : 'Total leads';
+    var trendRows = eventMode ? calc.trend : calc.leadTrend;
+    renderKpis([
+      kpi(baseLabel, calc.kpis.totalLeads, 'users', pct(calc.kpis.contactRate), eventMode ? 'Evento filtrado' : 'Base filtrada'),
+      kpi('Contactables', calc.kpis.contactables, 'phone', pct(calc.kpis.contactRate), 'Del total'),
+      kpi('Potenciales', calc.kpis.potenciales, 'user-check', pct(calc.kpis.potentialRate), 'Sobre contactables'),
+      kpi('Citas reales', calc.kpis.citas, 'calendar-check', pct(calc.kpis.leadToCita), 'Lead a cita'),
+      kpi('Presencias', calc.kpis.presencias, 'badge-check', pct(div(calc.kpis.presencias, calc.kpis.citas)), 'Sobre citas'),
+      kpi('Tours validos', calc.kpis.tours, 'route', pct(calc.kpis.citaToTour), 'Cita a tour'),
+      kpi('Separaciones', calc.kpis.separaciones, 'handshake', pct(calc.kpis.leadToSeparacion), 'Lead a separacion'),
+      kpi('Procesables', calc.kpis.procesables, 'file-check-2', pct(calc.kpis.leadToProcesable), 'Lead a procesable')
+    ]);
+    el('dashboardContent').innerHTML =
+      '<div class="grid">' +
+        panel('span-7', 'Embudo comercial', 'Conversion por etapa', renderFunnelAdvanced(calc.funnel)) +
+        panel('span-5', 'Salud del pipeline', 'Diagnostico operativo', renderPipelineHealth(calc)) +
+        panel('span-8', 'Tendencia comercial', renderTrendLabel(trendRows, eventMode ? eventTrendKey(calc.filters.tipoFecha) : 'leads'), chartBox('commercialTrend', 'lg')) +
+        panel('span-4', 'Insights clave', 'Acciones sugeridas', renderInsights(calc.alerts)) +
+        panel('span-4', 'Desempeno de asesores', 'Citas, tours y cierre', renderAdvisorPanel(calc.advisorPerf)) +
+        panel('span-4', 'Demanda por distrito', 'Sin no especificado', renderDonutWithLegend('districtChart', calc.districtDemand.slice(0, 8), calc.districtDemand)) +
+        panel('span-4', 'Calidad por fuente', 'Volumen y conversion', renderSourceQuality(calc.sourceQuality.slice(0, 7))) +
+        panel('span-6', 'Citas vs tours', 'Relacion de avance', chartBox('citaTourChart', 'sm')) +
+        panel('span-6', 'Tipificaciones', 'Ultima gestion agrupada', renderDonutWithLegend('tipifChart', calc.tipifs.slice(0, 8), calc.tipifs)) +
+      '</div>';
+    chartLine('commercialTrend', trendRows, [
+      [eventMode ? baseLabel : 'Leads', eventMode ? eventTrendKey(calc.filters.tipoFecha) : 'leads', '#00508f'],
+      ['Contactables', 'contactables', '#0d9488'],
+      ['Citas', 'citas', '#11915b'],
+      ['Tours', 'tours', '#f58220'],
+      ['Separaciones', 'separaciones', '#e5483f']
+    ]);
+    chartCombo('citaTourChart', trendRows, 'citas', 'tours');
+    chartDonut('districtChart', calc.districtDemand.slice(0, 8));
+    chartDonut('tipifChart', calc.tipifs.slice(0, 8));
+    refreshIcons();
+  }
+
+  function renderMarketing(calc) {
+    var eventMode = String(calc.filters.mode || '').toUpperCase() === 'EVENTO';
+    var baseLabel = eventMode ? eventBaseLabel(calc.filters.tipoFecha) : 'Leads generados';
+    var trendRows = eventMode ? calc.trend : calc.leadTrend;
+    renderKpis([
+      kpi(baseLabel, calc.kpis.totalLeads, 'users', pct(calc.kpis.contactRate), eventMode ? 'Evento filtrado' : 'Desde fuentes'),
+      kpi('Contactables', calc.kpis.contactables, 'phone', pct(calc.kpis.contactRate), 'Calidad de contacto'),
+      kpi('Potenciales', calc.kpis.potenciales, 'user-check', pct(calc.kpis.potentialRate), 'Interes valido'),
+      kpi('Citas generadas', calc.kpis.citas, 'calendar-check', pct(calc.kpis.leadToCita), 'Lead a cita'),
+      kpi('Tours generados', calc.kpis.tours, 'route', pct(calc.kpis.citaToTour), 'Cita a tour'),
+      kpi('Separaciones', calc.kpis.separaciones, 'handshake', pct(calc.kpis.leadToSeparacion), 'Lead a separacion')
+    ]);
+    el('dashboardContent').innerHTML =
+      '<div class="grid">' +
+        panel('span-5', 'Embudo de marketing real', 'Desde lead captado', renderFunnelAdvanced(calc.funnel.slice(0, 4))) +
+        panel('span-7', 'Tendencia de adquisicion', renderTrendLabel(trendRows, eventMode ? eventTrendKey(calc.filters.tipoFecha) : 'leads'), chartBox('marketingTrend', 'lg')) +
+        panel('span-5', 'Rendimiento por fuente', 'Volumen y calidad', renderMarketingSourceTable(calc.sourceQuality)) +
+        panel('span-4', 'Matriz calidad vs volumen', 'Fuente por escala y conversion', chartBox('qualityMatrix', 'sm')) +
+        panel('span-3', 'Insights de adquisicion', 'Sin datos monetarios', renderInsights(calc.alerts)) +
+        panel('span-5', 'Demanda por distrito', 'Zonas con distrito valido', renderDonutWithLegend('marketingDistrictChart', calc.districtDemand.slice(0, 8), calc.districtDemand)) +
+        panel('span-4', 'Tipificaciones por fuente', 'Calidad percibida', renderDonutWithLegend('marketingTipifChart', calc.tipifs.slice(0, 8), calc.tipifs)) +
+        panel('span-3', 'Fuentes principales', 'Lead a cita', renderSourceQuality(calc.sourceQuality.slice(0, 5))) +
+      '</div>';
+    chartLine('marketingTrend', trendRows, [
+      [eventMode ? baseLabel : 'Leads', eventMode ? eventTrendKey(calc.filters.tipoFecha) : 'leads', '#00508f'],
+      ['Contactables', 'contactables', '#0d9488'],
+      ['Citas', 'citas', '#11915b']
+    ]);
+    chartBubble('qualityMatrix', calc.sourceQuality.slice(0, 8));
+    chartDonut('marketingDistrictChart', calc.districtDemand.slice(0, 8));
+    chartDonut('marketingTipifChart', calc.tipifs.slice(0, 8));
+    refreshIcons();
+  }
+
+  function renderCallCenter(calc) {
+    var k = calc.callKpis;
+    var callTrend = calc.gestionTrend.length ? calc.gestionTrend : calc.trend;
+    renderKpis([
+      kpi('Leads asignados', k.asignados, 'user-plus', pct(div(k.asignados, calc.kpis.totalLeads)), 'Del total'),
+      kpi('Gestionados', k.gestionados, 'clipboard-check', pct(div(k.gestionados, k.asignados || calc.kpis.totalLeads)), 'Avance operativo'),
+      kpi('Contactabilidad', pct(k.contactRate), 'phone-call', '', 'Contactos efectivos'),
+      kpi('Intentos promedio', k.intentosPromedio.toFixed(1), 'repeat-2', '', 'Gestiones / lead'),
+      kpi('Primera gestion', formatAge(k.primeraGestionDias), 'timer', '', 'Promedio'),
+      kpi('Citas agendadas', k.citas, 'calendar-check', pct(div(k.citas, k.gestionados)), 'Sobre gestionados'),
+      kpi('No contacto', pct(k.noContactRate), 'phone-off', '', 'Riesgo'),
+      kpi('Seguimientos', k.pendientes, 'alarm-clock', '', 'Pendientes')
+    ]);
+    el('dashboardContent').innerHTML =
+      '<div class="grid">' +
+        panel('span-7', 'Embudo de gestion', 'Asignacion a cita', renderFunnelAdvanced(calc.callFunnel)) +
+        panel('span-5', 'Salud operativa', 'SLA y riesgos', renderSla(calc.sla)) +
+        panel('span-7', 'Tendencia de gestion', renderTrendLabel(callTrend, 'gestiones'), chartBox('callTrend', 'lg')) +
+        panel('span-5', 'Productividad de agentes', 'Gestion y citas', renderAdvisorPanel(calc.advisorPerf)) +
+        panel('span-4', 'Tipificaciones', 'Motivos de ultima gestion', renderDonutWithLegend('callTipifChart', calc.tipifs.slice(0, 8), calc.tipifs)) +
+        panel('span-4', 'Actividad por fecha', 'Gestiones, contactos y citas', chartBox('callActivityChart', 'sm')) +
+        panel('span-4', 'Seguimientos pendientes', 'Cola por antiguedad', renderFollowups(calc.followups)) +
+        panel('span-4', 'Calidad por fuente', 'Contactabilidad y citas', renderSourceQuality(calc.sourceQuality.slice(0, 6))) +
+        panel('span-8', 'Insights operativos', 'Acciones de supervisor', renderInsights(calc.alerts)) +
+      '</div>';
+    chartLine('callTrend', callTrend, [
+      ['Gestiones', 'gestiones', '#0d9488'],
+      ['Contactables', 'contactables', '#11915b'],
+      ['Citas', 'citas', '#f58220']
+    ]);
+    chartLine('callActivityChart', callTrend, [
+      ['Gestiones', 'gestiones', '#0d9488'],
+      ['Contactables', 'contactables', '#11915b'],
+      ['Citas', 'citas', '#f58220']
+    ]);
+    chartDonut('callTipifChart', calc.tipifs.slice(0, 8));
+    refreshIcons();
+  }
+
+  function renderAlertsModule(calc) {
+    renderKpis([
+      kpi('Alertas', calc.alerts.length, 'bell', '', 'Acciones detectadas'),
+      kpi('Leads criticos', calc.sla.criticos, 'triangle-alert', '', 'Potenciales sin cierre'),
+      kpi('Sin gestionar', calc.sla.sinGestion, 'clipboard-x', '', 'Sin gestion visible'),
+      kpi('Seguimientos', calc.sla.seguimientos, 'alarm-clock', '', 'Pendientes')
+    ]);
+    el('dashboardContent').innerHTML =
+      '<div class="grid">' +
+        panel('span-5', 'Insights accionables', 'Prioridad de gestion', renderInsights(calc.alerts)) +
+        panel('span-7', 'Embudo y fuga', 'Contexto de alertas', renderFunnelAdvanced(calc.funnel)) +
+        panel('span-6', 'Fuentes con oportunidad', 'Lead a cita', renderSourceQuality(calc.sourceQuality.slice(0, 8))) +
+        panel('span-6', 'Distritos validos', 'Demanda limpia', renderDonutWithLegend('alertDistrictChart', calc.districtDemand.slice(0, 8), calc.districtDemand)) +
+      '</div>';
+    chartDonut('alertDistrictChart', calc.districtDemand.slice(0, 8));
+    refreshIcons();
+  }
+
+  function renderQuality(calc) {
+    renderKpis([
+      kpi('Leads evaluados', calc.quality.total, 'database', '', 'Filtro actual'),
+      kpi('Sin distrito', calc.quality.sinDistrito, 'map-pin-off', pct(div(calc.quality.sinDistrito, calc.quality.total)), 'Calidad geografica'),
+      kpi('Sin asesor/OPC', calc.quality.sinAsesor, 'user-x', pct(div(calc.quality.sinAsesor, calc.quality.total)), 'Asignacion'),
+      kpi('Sin tipificacion', calc.quality.sinTipificacion, 'file-question', pct(div(calc.quality.sinTipificacion, calc.quality.total)), 'Gestion')
+    ]);
+    el('dashboardContent').innerHTML =
+      '<div class="grid">' +
+        panel('span-4', 'Calidad de distrito', 'No especificado excluido de analisis comercial', renderQualityBars(calc.quality)) +
+        panel('span-4', 'Distribucion de tipificaciones', 'Auditoria de gestion', renderDonutWithLegend('qualityTipifChart', calc.tipifs.slice(0, 8), calc.tipifs)) +
+        panel('span-4', 'Payload actual', 'Cobertura de datos', renderPayloadInfo()) +
+        panel('span-6', 'Fuentes', 'Catalogo normalizado', renderSourceQuality(calc.sourceQuality.slice(0, 8))) +
+        panel('span-6', 'Distritos validos', 'Datos usados en graficos comerciales', renderDonutWithLegend('qualityDistrictChart', calc.districtDemand.slice(0, 8), calc.districtDemand)) +
+      '</div>';
+    chartDonut('qualityTipifChart', calc.tipifs.slice(0, 8));
+    chartDonut('qualityDistrictChart', calc.districtDemand.slice(0, 8));
+    refreshIcons();
+  }
+
+  function renderKpis(cards) {
+    el('kpiGrid').innerHTML = cards.map(function (c) {
+      return '<article class="kpi-card">' +
+        '<div class="kpi-top"><span>' + escapeHtml(c.label) + '</span><span class="kpi-icon"><i data-lucide="' + c.icon + '"></i></span></div>' +
+        '<div class="kpi-value"><strong>' + escapeHtml(formatValue(c.value)) + '</strong>' + (c.delta ? '<span class="kpi-delta">' + escapeHtml(c.delta) + '</span>' : '') + '</div>' +
+        '<div class="kpi-foot">' + escapeHtml(c.foot || '') + '</div>' +
+      '</article>';
+    }).join('');
+  }
+
+  function renderFunnelAdvanced(rows) {
+    var max = rows.length ? rows[0].value || 1 : 1;
+    var colors = ['#061b36', '#00508f', '#0d9488', '#11915b', '#e7bd38', '#f58220', '#ef6045', '#ca2c2c'];
+    var visual = rows.map(function (r, i) {
+      var width = Math.max(26, Math.round(div(r.value, max) * 100));
+      return '<div class="funnel-slice" title="' + escapeAttr(r.label + ': ' + fmtNum(r.value) + ' | ' + pct(r.totalRate || r.rate)) + '" style="width:' + width + '%;background:' + colors[i % colors.length] + '">' + escapeHtml(r.label) + '</div>';
+    }).join('');
+    var table = rows.map(function (r, i) {
+      var cls = i && r.rate < 0.35 ? 'warn' : (i && r.rate >= 0.7 ? 'good' : '');
+      return '<div class="funnel-row"><strong>' + escapeHtml(r.label) + '</strong><span>' + fmtNum(r.value) + '</span><span class="' + cls + '">' + (i ? pct(r.rate) : '100%') + '</span></div>';
+    }).join('');
+    return '<div class="funnel-advanced"><div class="funnel-visual">' + visual + '</div><div class="funnel-table">' + table + '</div></div>';
+  }
+
+  function renderPipelineHealth(calc) {
+    var leak = biggestLeak(calc.funnel);
+    var critical = leak ? leak.to : 'Sin etapa critica';
+    var rec = leak ? 'Reforzar accion entre ' + leak.from + ' y ' + leak.to + '.' : 'Mantener ritmo actual.';
+    return '<div class="health-grid">' +
+      healthCard('Lead a cita', pct(calc.kpis.leadToCita), 'Conversion comercial inicial') +
+      healthCard('Mayor fuga', leak ? leak.from + ' -> ' + leak.to : 'Sin fuga', leak ? fmtNum(leak.lost) + ' leads no avanzan' : 'Sin datos') +
+      healthCard('Etapa critica', critical, leak ? pct(leak.rate) + ' de conversion de etapa' : 'Sin riesgo') +
+      healthCard('Accion sugerida', rec, 'Recomendacion operativa') +
+    '</div>';
+  }
+
+  function renderAdvisorPanel(rows) {
+    var top = rows.filter(function (r) { return r.label !== 'SIN_ASESOR'; }).slice(0, 6);
+    if (!top.length) return emptyBlock('Sin datos');
+    return '<div class="rank-list">' + top.map(function (r, i) {
+      return rankItem((i + 1) + '. ' + r.label, fmtNum(r.citas) + ' citas | ' + pct(r.citaRate), r.citaRate);
+    }).join('') + '</div>';
+  }
+
+  function renderSourceQuality(rows) {
+    if (!rows.length) return emptyBlock('Sin datos');
+    return '<div class="bars">' + rows.map(function (r) {
+      return barRow(r.label, fmtNum(r.leads) + ' leads | ' + pct(r.leadToCita), Math.min(1, r.leadToCita * 4), r.leadToCita < 0.03);
+    }).join('') + '</div>';
+  }
+
+  function renderDonutWithLegend(chartId, chartRows, allRows) {
+    var total = (allRows || chartRows || []).reduce(function (s, r) { return s + num(r.value); }, 0);
+    var legend = (chartRows || []).map(function (r) {
+      return '<div class="legend-row"><strong>' + escapeHtml(r.label) + '</strong><span>' + fmtNum(r.value) + ' - ' + pct(div(r.value, total)) + '</span></div>';
+    }).join('');
+    return '<div class="donut-layout"><div class="chart-box sm"><canvas id="' + chartId + '"></canvas></div><div class="legend-list">' + (legend || emptyBlock('Sin datos')) + '</div></div>';
+  }
+
+  function renderInsights(rows) {
+    return '<div class="insight-list">' + rows.slice(0, 6).map(function (r) {
+      var icon = r.type === 'danger' ? 'triangle-alert' : (r.type === 'warn' ? 'circle-alert' : 'trending-up');
+      return '<div class="insight-item"><span class="insight-icon ' + (r.type === 'danger' ? 'danger' : r.type === 'warn' ? 'warn' : '') + '"><i data-lucide="' + icon + '"></i></span><div><strong>' + escapeHtml(r.title) + '</strong><span>' + escapeHtml(r.body) + '</span></div><i data-lucide="chevron-right"></i></div>';
+    }).join('') + '</div>';
+  }
+
+  function renderMarketingSourceTable(rows) {
+    if (!rows.length) return emptyBlock('Sin datos');
+    var html = '<div class="table-wrap"><table><thead><tr><th>Fuente</th><th>Leads</th><th>Contactables</th><th>Potenciales</th><th>Citas</th><th>Lead a cita</th></tr></thead><tbody>';
+    html += rows.slice(0, 9).map(function (r) {
+      return '<tr><td>' + escapeHtml(r.label) + '</td><td>' + fmtNum(r.leads) + '</td><td>' + fmtNum(r.contactables) + '</td><td>' + fmtNum(r.potenciales) + '</td><td>' + fmtNum(r.citas) + '</td><td>' + pct(r.leadToCita) + '</td></tr>';
+    }).join('');
+    return html + '</tbody></table></div>';
+  }
+
+  function renderSla(sla) {
+    return '<div class="sla-grid">' +
+      slaCard('Leads sin gestionar', sla.sinGestion, 'Atencion', 'warn') +
+      slaCard('Leads criticos', sla.criticos, 'Prioridad alta', 'danger') +
+      slaCard('Seguimientos', sla.seguimientos, 'Recontactar', 'warn') +
+      slaCard('Datos no utiles', sla.datoFalso, 'Depurar', '') +
+    '</div>';
+  }
+
+  function renderFollowups(rows) {
+    var total = rows.reduce(function (s, r) { return s + r.value; }, 0);
+    return '<div class="bars">' + rows.map(function (r) {
+      return barRow(r.label, fmtNum(r.value) + ' - ' + pct(div(r.value, total)), div(r.value, total), r.min >= 3);
+    }).join('') + '</div>';
+  }
+
+  function renderQualityBars(q) {
+    return '<div class="bars">' +
+      barRow('Sin distrito', fmtNum(q.sinDistrito) + ' - ' + pct(div(q.sinDistrito, q.total)), div(q.sinDistrito, q.total), true) +
+      barRow('Sin asesor/OPC', fmtNum(q.sinAsesor) + ' - ' + pct(div(q.sinAsesor, q.total)), div(q.sinAsesor, q.total), true) +
+      barRow('Sin tipificacion', fmtNum(q.sinTipificacion) + ' - ' + pct(div(q.sinTipificacion, q.total)), div(q.sinTipificacion, q.total), true) +
+    '</div>';
+  }
+
+  function renderPayloadInfo() {
+    var p = state.payload || {};
+    var counts = p.counts || {};
+    var scope = p.dataScope || {};
+    return '<div class="bars">' +
+      '<div class="rank-item"><strong>Snapshot ETL</strong><span>' + escapeHtml(formatDateTime(p.snapshotGeneratedAt || p.generatedAt || '')) + '</span></div>' +
+      barRow('Leads cache', fmtNum(counts.leads || 0), 1) +
+      barRow('Eventos cache', fmtNum(counts.events || 0), 1) +
+      barRow('Eventos cargados', fmtNum((p.data && p.data.events || []).length), div((p.data && p.data.events || []).length, counts.events || 1)) +
+      '<div class="rank-item"><strong>Rango eventos</strong><span>' + escapeHtml((scope.eventDateStart || '') + ' a ' + (scope.eventDateEnd || '')) + '</span></div>' +
+    '</div>';
+  }
+
+  function chartLine(id, rows, metrics) {
+    chart(id, 'line', rows.map(function (r) { return r.date; }), metrics.map(function (m) {
+      return { label: m[0], data: rows.map(function (r) { return num(r[m[1]]); }), borderColor: m[2], backgroundColor: m[2], tension: 0.35, pointRadius: 2, pointHoverRadius: 6, borderWidth: 2 };
+    }), { legend: true });
+  }
+
+  function chartDonut(id, rows) {
+    chart(id, 'doughnut', rows.map(function (r) { return r.label; }), [{
+      data: rows.map(function (r) { return num(r.value); }),
+      backgroundColor: ['#00508f', '#0d9488', '#11915b', '#f58220', '#e5483f', '#4f46e5', '#64748b', '#a855f7', '#14b8a6'],
+      hoverOffset: 10,
+      borderWidth: 2,
+      borderColor: '#ffffff'
+    }], { legend: false, doughnut: true });
+  }
+
+  function chartCombo(id, rows, barKey, lineKey) {
+    chart(id, 'bar', rows.map(function (r) { return r.date; }), [
+      { type: 'bar', label: 'Citas', data: rows.map(function (r) { return num(r[barKey]); }), backgroundColor: 'rgba(13,148,136,0.42)', hoverBackgroundColor: 'rgba(13,148,136,0.72)', borderColor: '#0d9488' },
+      { type: 'line', label: 'Tours', data: rows.map(function (r) { return num(r[lineKey]); }), borderColor: '#f58220', backgroundColor: '#f58220', tension: 0.35, pointRadius: 2, pointHoverRadius: 6 }
+    ], { legend: true });
+  }
+
+  function chartBubble(id, rows) {
+    var data = rows.map(function (r) {
+      return { x: r.leads, y: Math.round((r.leadToCita || 0) * 1000) / 10, r: Math.max(7, Math.min(24, Math.sqrt(r.leads || 1))), label: r.label };
+    });
+    chart(id, 'bubble', [], [{ label: 'Fuentes', data: data, backgroundColor: 'rgba(13,148,136,0.58)', hoverBackgroundColor: 'rgba(245,130,32,0.72)', borderColor: '#0d9488' }], { legend: false, bubble: true });
+  }
+
+  function chart(id, type, labels, datasets, opts) {
+    var canvas = el(id);
+    if (!canvas || typeof Chart === 'undefined') return;
+    if (state.charts[id]) state.charts[id].destroy();
+    state.charts[id] = new Chart(canvas.getContext('2d'), {
+      type: type,
+      data: { labels: labels, datasets: datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        resizeDelay: 120,
+        interaction: { mode: 'nearest', intersect: false },
+        animation: { duration: 650 },
+        plugins: {
+          legend: { display: !!(opts && opts.legend), position: 'bottom', labels: { boxWidth: 10, usePointStyle: true } },
+          tooltip: {
+            padding: 10,
+            backgroundColor: '#061b36',
+            titleColor: '#ffffff',
+            bodyColor: '#dbeafe',
+            callbacks: {
+              label: function (ctx) {
+                var raw = ctx.raw || {};
+                if (raw.label) return raw.label + ': ' + raw.x + ' leads | ' + raw.y + '% lead a cita';
+                var value = ctx.parsed && ctx.parsed.y != null ? ctx.parsed.y : ctx.raw;
+                if (type === 'doughnut') value = ctx.raw;
+                return ctx.dataset.label + ': ' + fmtNum(value);
+              }
+            }
+          }
+        },
+        cutout: opts && opts.doughnut ? '64%' : undefined,
+        scales: opts && opts.doughnut ? {} : {
+          y: { beginAtZero: true, grid: { color: '#edf2f7' } },
+          x: { grid: { display: false }, ticks: { maxRotation: 0, autoSkip: true } }
+        }
+      }
+    });
+  }
+
+  function destroyCharts() {
+    Object.keys(state.charts).forEach(function (id) {
+      if (state.charts[id] && state.charts[id].destroy) state.charts[id].destroy();
+    });
+    state.charts = {};
+  }
+
+  function buildDerivedCatalogs(data) {
+    var sets = { fuente: {}, proyecto: {}, distrito: {}, agente: {}, etapa: {}, tipificacion: {} };
+    (data.leads || []).forEach(add);
+    (data.events || []).forEach(add);
+    function add(r) {
+      addSet(sets.fuente, r.fu);
+      addSet(sets.proyecto, r.py);
+      addSet(sets.distrito, r.di);
+      addSet(sets.agente, r.as);
+      addSet(sets.agente, r.op);
+      addSet(sets.etapa, r.et || stageOfEvent(r));
+      addSet(sets.tipificacion, r.ti);
+    }
+    return {
+      fuente: sortedKeys(sets.fuente),
+      proyecto: sortedKeys(sets.proyecto),
+      distrito: sortedKeys(sets.distrito),
+      agente: sortedKeys(sets.agente),
+      etapa: sortedKeys(sets.etapa),
+      tipificacion: sortedKeys(sets.tipificacion)
+    };
+  }
+
+  function stageOfLead(l) {
+    if (l.pr) return 'PROCESABLE';
+    if (l.se) return 'SEPARACION';
+    if (l.to) return 'TOUR';
+    if (l.pp) return 'PRESENCIA';
+    if (l.ci) return 'CITA';
+    if (l.po) return 'POTENCIAL';
+    if (l.co) return 'CONTACTABLE';
+    return 'LEAD';
+  }
+
+  function stageOfEvent(r) {
+    if (r.pr) return 'PROCESABLE';
+    if (r.se) return 'SEPARACION';
+    if (r.to) return 'TOUR';
+    if (r.pp) return 'PRESENCIA';
+    if (r.ci) return 'CITA';
+    if (r.po) return 'POTENCIAL';
+    if (r.co) return 'CONTACTABLE';
+    if (r.tf) return r.tf;
+    return 'LEAD';
+  }
+
+  function dateForLead(l, tipo) {
+    tipo = String(tipo || 'CAPTACION').toUpperCase();
+    if (tipo === 'ASIGNACION') return l.fa;
+    if (tipo === 'GESTION') return l.fg;
+    if (tipo === 'CITA') return l.fci;
+    if (tipo === 'PRESENCIA') return l.fp;
+    if (tipo === 'TOUR') return l.ft;
+    if (tipo === 'SEPARACION') return l.fs;
+    if (tipo === 'PROCESABLE') return l.fpr;
+    return l.fc;
+  }
+
+  function isFollowup(l) {
+    var t = String(l.ti || '');
+    return t === 'VOLVER A LLAMAR' || t === 'SEGUIMIENTO' || t === 'INFO. WHATSAPP';
+  }
+
+  function biggestLeak(funnel) {
+    var leak = null;
+    for (var i = 1; i < funnel.length; i++) {
+      var prev = funnel[i - 1], cur = funnel[i];
+      if (!prev.value) continue;
+      var lost = Math.max(0, prev.value - cur.value);
+      var item = { from: prev.label, to: cur.label, rate: cur.value / prev.value, lost: lost };
+      if (!leak || item.rate < leak.rate) leak = item;
+    }
+    return leak;
+  }
+
+  function bestSource(rows) {
+    return rows.filter(function (r) { return r.leads >= 5; }).sort(function (a, b) { return b.leadToCita - a.leadToCita; })[0] || null;
+  }
+
+  function groupLeads(rows, field) {
+    var map = {};
+    rows.forEach(function (r) {
+      var key = r[field] || 'SIN_DATO';
+      map[key] = (map[key] || 0) + 1;
+    });
+    return Object.keys(map).map(function (k) { return { label: k, value: map[k] }; }).sort(function (a, b) { return b.value - a.value; });
+  }
+
+  function groupEvents(rows, field, tipoFecha) {
+    var map = {};
+    rows.forEach(function (r) {
+      var key = r[field] || 'SIN_DATO';
+      map[key] = (map[key] || 0) + eventBaseMetric(r, tipoFecha);
+    });
+    return Object.keys(map).map(function (k) { return { label: k, value: map[k] }; }).sort(function (a, b) { return b.value - a.value; });
+  }
+
+  function sumEvents(rows, field) {
+    return (rows || []).reduce(function (s, r) { return s + num(r[field]); }, 0);
+  }
+
+  function isFollowupEvent(r) {
+    var t = String(r && r.ti || '');
+    return t === 'VOLVER A LLAMAR' || t === 'SEGUIMIENTO' || t === 'INFO. WHATSAPP';
+  }
+
+  function renderTrendLabel(rows, field) {
+    var t = trendDelta(rows, field || 'leads');
+    if (!rows.length) return 'Sin serie';
+    return (t >= 0 ? 'Tendencia +' : 'Tendencia ') + pct(t);
+  }
+
+  function trendDelta(rows, field) {
+    if (!rows || rows.length < 2) return 0;
+    var mid = Math.floor(rows.length / 2);
+    var a = rows.slice(0, mid).reduce(function (s, r) { return s + num(r[field]); }, 0);
+    var b = rows.slice(mid).reduce(function (s, r) { return s + num(r[field]); }, 0);
+    return div(b - a, a || b || 1);
+  }
+
+  function kpi(label, value, icon, delta, foot) { return { label: label, value: value, icon: icon, delta: delta, foot: foot }; }
+  function panel(cls, title, sub, body) { return '<article class="panel ' + cls + '"><div class="panel-head"><h2>' + escapeHtml(title) + '</h2><span>' + escapeHtml(sub || '') + '</span></div>' + body + '</article>'; }
+  function chartBox(id, size) { return '<div class="chart-box ' + (size || '') + '"><canvas id="' + id + '"></canvas></div>'; }
+  function healthCard(label, value, body) { return '<div class="health-card"><small>' + escapeHtml(label) + '</small><strong title="' + escapeAttr(value) + '">' + escapeHtml(value) + '</strong><p>' + escapeHtml(body) + '</p></div>'; }
+  function slaCard(label, value, tag, type) { return '<div class="sla-card"><small>' + escapeHtml(label) + '</small><strong>' + fmtNum(value) + '</strong><span class="tag ' + (type || '') + '">' + escapeHtml(tag) + '</span></div>'; }
+  function rankItem(label, value, pctValue) { return '<div class="rank-item"><div><strong>' + escapeHtml(label) + '</strong><div class="bar-track"><div class="bar-fill" style="width:' + Math.round(Math.min(1, pctValue || 0) * 100) + '%"></div></div></div><span>' + escapeHtml(value) + '</span></div>'; }
+  function barRow(label, value, pctValue, warn) { return '<div class="bar-row"><div class="bar-copy"><strong>' + escapeHtml(label) + '</strong><span>' + escapeHtml(value) + '</span></div><div class="bar-track"><div class="bar-fill ' + (warn ? 'warn' : '') + '" style="width:' + Math.round(Math.min(1, pctValue || 0) * 100) + '%"></div></div></div>'; }
+  function emptyBlock(text) { return '<div class="placeholder small"><div><strong>' + escapeHtml(text || 'Sin datos') + '</strong></div></div>'; }
+
+  function fillSelect(id, values, selected, includeTodos) {
+    var node = el(id);
+    var list = unique(values || []).filter(Boolean);
+    if (includeTodos && list.indexOf('TODOS') === -1) list.unshift('TODOS');
+    if (!list.length) list = includeTodos ? ['TODOS'] : [];
+    selected = list.indexOf(selected) !== -1 ? selected : (includeTodos ? 'TODOS' : list[0] || '');
+    node.innerHTML = list.map(function (v) { return '<option value="' + escapeAttr(v) + '"' + (v === selected ? ' selected' : '') + '>' + escapeHtml(labelize(v)) + '</option>'; }).join('');
+  }
+
+  function setSyncStatus(payload) {
+    var d = payload.snapshotGeneratedAt || payload.generatedAt || '';
+    el('syncDate').textContent = d ? formatDateTime(d) : 'Sin sincronizar';
+    var alertCount = (payload.data && payload.data.alerts || []).length;
+    el('alertBadge').textContent = alertCount > 99 ? '99+' : String(alertCount);
+    var alertNav = document.querySelector('[data-module="alertas"]');
+    if (alertNav) alertNav.classList.toggle('has-alert', alertCount > 0);
+  }
+
+  function showBusy(show, title, sub) {
+    el('loadingTitle').textContent = title || 'Procesando';
+    el('loadingSub').textContent = sub || '';
+    el('loading').classList.toggle('show', !!show);
+    ['applyBtn', 'clearBtn', 'refreshBtn'].forEach(function (id) { el(id).disabled = !!show; });
+  }
+
+  function showError(err) {
+    console.error(err);
+    toast('Error: ' + (err && err.message ? err.message : err));
+    renderEmptyShell('No se pudo cargar el dashboard', err && err.message ? err.message : String(err));
+  }
+
+  function renderEmptyShell(title, body) {
+    el('kpiGrid').innerHTML = '';
+    el('dashboardContent').innerHTML = '<div class="panel placeholder"><div><strong>' + escapeHtml(title) + '</strong><p>' + escapeHtml(body || '') + '</p></div></div>';
+  }
+
+  function toast(message) {
+    var node = el('toast');
+    node.textContent = message;
+    node.classList.add('show');
+    window.clearTimeout(toast._timer);
+    toast._timer = window.setTimeout(function () { node.classList.remove('show'); }, 4200);
+  }
+
+  function refreshIcons() {
+    if (window.lucide && lucide.createIcons) lucide.createIcons();
+  }
+
+  function el(id) { return document.getElementById(id); }
+  function value(id) { return el(id).value; }
+  function match(value, selected) { return !selected || selected === 'TODOS' || String(value || '') === String(selected || ''); }
+  function matchAny(values, selected) { return !selected || selected === 'TODOS' || values.some(function (v) { return String(v || '') === String(selected); }); }
+  function dateInRange(value, start, end) { return !!value && (!start || value >= start) && (!end || value <= end); }
+  function div(a, b) { a = num(a); b = num(b); return b ? a / b : 0; }
+  function num(v) { return Number(v || 0) || 0; }
+  function average(values) { return values.length ? values.reduce(function (s, v) { return s + v; }, 0) / values.length : 0; }
+  function unique(values) { var seen = {}; return (values || []).filter(function (v) { if (!v || seen[v]) return false; seen[v] = true; return true; }); }
+  function mergeValues(a, b) { return unique((a || []).concat(b || [])); }
+  function addSet(set, value) { if (value) set[value] = true; }
+  function sortedKeys(set) { return Object.keys(set).sort(function (a, b) { return a.localeCompare(b); }); }
+  function merge(base, patch) { var out = {}; Object.keys(base || {}).forEach(function (k) { out[k] = base[k]; }); Object.keys(patch || {}).forEach(function (k) { out[k] = patch[k]; }); return out; }
+
+  function fmtNum(v) { return num(v).toLocaleString('es-PE'); }
+  function pct(v) { return (num(v) * 100).toFixed(1) + '%'; }
+  function formatValue(v) { return typeof v === 'number' ? fmtNum(v) : String(v == null ? '' : v); }
+  function labelize(v) { return String(v || '').replace(/_/g, ' '); }
+  function formatAge(days) { if (!days) return '0h'; if (days < 1) return Math.round(days * 24) + 'h'; return days.toFixed(1) + 'd'; }
+  function firstDayOfMonth() { var d = new Date(); return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-01'; }
+  function todayKey() { var d = new Date(); return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); }
+  function pad(v) { return String(v).padStart(2, '0'); }
+  function parseDate(s) { if (!s) return null; var p = String(s).split('-'); if (p.length < 3) return null; return new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2])); }
+  function daysBetween(a, b) { var da = parseDate(a), db = parseDate(b); if (!da || !db) return 0; return Math.floor((db.getTime() - da.getTime()) / 86400000); }
+  function formatDateTime(value) {
+    var d = new Date(value);
+    if (isNaN(d.getTime())) return String(value).substring(0, 19);
+    return d.toLocaleString('es-PE', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  }
+  function escapeHtml(v) { return String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;'); }
+  function escapeAttr(v) { return escapeHtml(v); }
+})();
+</script>

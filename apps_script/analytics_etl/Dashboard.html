@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <?!= dashboardInclude('DashboardStyles'); ?>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-symbol" aria-hidden="true">
+          <span></span><span></span><span></span><span></span>
+        </div>
+        <div class="brand-copy">
+          <strong>TRIGAL SUR</strong>
+          <small>INTELLIGENCE</small>
+        </div>
+      </div>
+
+      <nav class="nav-tabs" aria-label="Modulos">
+        <button class="nav-item" data-module="executive"><i data-lucide="layout-dashboard"></i><span>Resumen Ejecutivo</span></button>
+        <button class="nav-item active" data-module="commercial"><i data-lucide="building-2"></i><span>Comercial</span></button>
+        <button class="nav-item" data-module="marketing"><i data-lucide="megaphone"></i><span>Marketing</span></button>
+        <button class="nav-item" data-module="callcenter"><i data-lucide="headphones"></i><span>Call Center</span></button>
+        <button class="nav-item" data-module="alertas"><i data-lucide="bell"></i><span>Alertas</span><b id="alertBadge">0</b></button>
+        <button class="nav-item" data-module="calidad"><i data-lucide="shield-check"></i><span>Calidad ETL</span></button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <span>Ultima actualizacion</span>
+        <strong id="syncDate">Sin sincronizar</strong>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="hero">
+        <div>
+          <p class="eyebrow" id="viewEyebrow">Vision 360 del embudo comercial</p>
+          <h1 id="viewTitle">Comercial</h1>
+        </div>
+        <div class="hero-actions">
+          <button class="icon-button" id="refreshBtn" type="button" title="Actualizar datos"><i data-lucide="refresh-cw"></i></button>
+          <div class="user-chip">
+            <span>AR</span>
+            <div>
+              <strong>Andres Ramirez</strong>
+              <small>Director Comercial</small>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <section class="filter-bar" aria-label="Filtros globales">
+        <label class="date-filter">
+          <span>Fecha</span>
+          <div>
+            <input id="dateStart" type="date">
+            <b>-</b>
+            <input id="dateEnd" type="date">
+          </div>
+        </label>
+        <label>
+          <span id="dateBaseLabel">Fecha base</span>
+          <select id="tipoFecha"></select>
+        </label>
+        <label>
+          <span>Analisis</span>
+          <select id="mode">
+            <option value="COHORTE">Cohorte</option>
+            <option value="EVENTO">Evento real</option>
+          </select>
+        </label>
+        <label>
+          <span>Fuente</span>
+          <select id="fuente"></select>
+        </label>
+        <label>
+          <span>Proyecto</span>
+          <select id="proyecto"></select>
+        </label>
+        <label>
+          <span>Distrito</span>
+          <select id="distrito"></select>
+        </label>
+        <label>
+          <span>Asesor / Agente</span>
+          <select id="agente"></select>
+        </label>
+        <label>
+          <span>Etapa</span>
+          <select id="etapa"></select>
+        </label>
+        <label>
+          <span>Tipificacion</span>
+          <select id="tipificacion"></select>
+        </label>
+        <div class="filter-actions">
+          <button id="applyBtn" type="button"><i data-lucide="filter"></i><span>Aplicar</span></button>
+          <button id="clearBtn" class="ghost-button" type="button"><i data-lucide="x"></i><span>Limpiar</span></button>
+        </div>
+      </section>
+
+      <section class="kpi-strip" id="kpiGrid"></section>
+      <section class="workspace" id="dashboardContent"></section>
+    </main>
+  </div>
+
+  <div id="loading" class="loading show">
+    <span class="spinner"></span>
+    <div>
+      <strong id="loadingTitle">Cargando capa analitica</strong>
+      <small id="loadingSub">Preparando dashboard</small>
+    </div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+  <?!= dashboardInclude('DashboardClient'); ?>
+</body>
+</html>

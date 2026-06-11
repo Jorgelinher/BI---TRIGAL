@@ -1,0 +1,32 @@
+# Local credentials and environment files
+.env
+.env.*
+.clasprc.json
+.clasp.json
+*secret*
+*credential*
+*token*
+
+# Runtime/cache/build noise
+node_modules/
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+*.bak
+
+# Local backups and old root-level copies.
+# Canonical source lives in apps_script/crm and apps_script/analytics_etl.
+/apps_script_backup_*/
+/portfolio_trigal/
+/Analytics_ETL.gs
+/Code.gs
+/Codigo.gs
+/Código.gs
+/Dashboard.html
+/DashboardClient.html
+/DashboardStyles.html
+/DashboardWeb.gs
+/Sidebar.html
+/opc_leads.gs
+/CONTEXTO_PROYECTO_TRIGAL_SUR.md
