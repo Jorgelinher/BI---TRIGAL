@@ -54,7 +54,7 @@
 
   function loadPayload(options) {
     options = options || {};
-    showBusy(true, options.title || 'Cargando datos', options.sub || 'Leyendo payload publicado');
+    showBusy(true, options.title || 'Cargando datos', options.sub || 'Leyendo configuracion publicada');
     google.script.run
       .withSuccessHandler(function (raw) {
         try {
@@ -71,7 +71,7 @@
         showError(err);
         showBusy(false);
       })
-      .getDashboardPayload();
+      .getDashboardBootstrap();
   }
 
   function applyPayload(payload, options) {
@@ -81,7 +81,8 @@
     options = options || {};
     var savedFilters = options.preserveFilters && state.payload ? readFilters() : null;
     state.payload = payload;
-    enrichPayload(payload);
+    if (payload.data) enrichPayload(payload);
+    else payload.derivedCatalogs = payload.derivedCatalogs || {};
     hydrateFilters(payload);
     if (savedFilters) restoreFilters(savedFilters);
     activateModule(state.activeModule || 'commercial', true);
@@ -119,14 +120,31 @@
       .withSuccessHandler(function (result) {
         if (!result || result.ok === false) {
           showBusy(false);
-          showError(new Error(result && result.error ? result.error : 'No se pudo programar la actualizacion.'));
+          loadPayload({
+            title: 'Cargando ultimo payload',
+            sub: 'No se pudo programar refresh manual; usando datos publicados',
+            message: 'Se muestra el ultimo payload disponible.'
+          });
+          return;
+        }
+        if (result.fallback) {
+          showBusy(false);
+          loadPayload({
+            title: 'Cargando ultimo payload',
+            sub: result.message || 'Refresh manual no disponible',
+            message: result.warning ? 'Refresh manual no disponible; usando trigger automatico.' : 'Se muestra el ultimo payload disponible.'
+          });
           return;
         }
         pollFreshPayload(previous, 0);
       })
       .withFailureHandler(function (err) {
-        showError(err);
         showBusy(false);
+        loadPayload({
+          title: 'Cargando ultimo payload',
+          sub: 'No se pudo invocar refresh manual; usando datos publicados',
+          message: 'Se muestra el ultimo payload disponible.'
+        });
       })
       .actualizarDashboardWeb();
   }
@@ -164,13 +182,13 @@
           showError(err);
           showBusy(false);
         })
-        .getDashboardPayload();
+        .getDashboardBootstrap();
     }, waitMs);
   }
 
   function payloadStamp(payload) {
     if (!payload) return '';
-    return String(payload.snapshotGeneratedAt || payload.generatedAt || '') + '|' +
+    return String(payload.snapshotGeneratedAt || payload.generatedAt || (payload.health && payload.health.generatedAt) || '') + '|' +
       String(payload.counts && payload.counts.events || 0) + '|' +
       String(payload.counts && payload.counts.leads || 0);
   }
@@ -200,14 +218,14 @@
   }
 
   function hydrateFilters(payload) {
-    var catalogs = payload.catalogs || {};
+    var catalogs = payload.catalogs || payload.options || {};
     var derived = payload.derivedCatalogs || {};
     fillSelect('tipoFecha', tipoFechaOptions, (payload.defaults && payload.defaults.tipoFecha) || 'CAPTACION', false);
     fillSelect('fuente', mergeValues(catalogs.FUENTE, derived.fuente), 'TODOS', true);
     fillSelect('proyecto', mergeValues(catalogs.PROYECTO, derived.proyecto), 'TODOS', true);
     fillSelect('distrito', mergeValues(catalogs.DISTRITO, derived.distrito), 'TODOS', true);
-    fillSelect('agente', derived.agente, 'TODOS', true);
-    fillSelect('etapa', derived.etapa, 'TODOS', true);
+    fillSelect('agente', mergeValues(mergeValues(catalogs.ASESOR, catalogs.NOMBRE_OPC), derived.agente), 'TODOS', true);
+    fillSelect('etapa', mergeValues(['LEAD', 'CONTACTABLE', 'POTENCIAL', 'CITA', 'PRESENCIA', 'TOUR', 'SEPARACION', 'PROCESABLE'], derived.etapa), 'TODOS', true);
     fillSelect('tipificacion', mergeValues(catalogs.TIPIFICACION, derived.tipificacion), 'TODOS', true);
     el('dateStart').value = (payload.defaults && payload.defaults.dateStart) || firstDayOfMonth();
     el('dateEnd').value = (payload.defaults && payload.defaults.dateEnd) || todayKey();
@@ -247,22 +265,37 @@
 
   function applyFilters(options) {
     options = options || {};
-    if (!state.payload || !state.payload.data) {
+    if (!state.payload) {
       renderEmptyShell('Sin datos disponibles', 'Publica el payload web del dashboard desde el ETL.');
       return;
     }
-    if (!options.silent) showBusy(true, 'Aplicando filtros', 'Calculando en navegador');
-    window.setTimeout(function () {
-      try {
-        destroyCharts();
-        var calc = computeDashboard(readFilters());
-        render(calc);
-      } catch (err) {
-        showError(err);
-      } finally {
+    if (!options.silent) showBusy(true, 'Aplicando filtros', 'Consultando agregados optimizados');
+    google.script.run
+      .withSuccessHandler(function (calc) {
+        try {
+          if (!calc || calc.ok === false) toast('Aviso: ' + ((calc && calc.error) || 'No se pudo calcular la vista.'));
+          destroyCharts();
+          render(calc);
+        } catch (err) {
+          showError(err);
+        } finally {
+          if (!options.silent) showBusy(false);
+        }
+      })
+      .withFailureHandler(function (err) {
+        if (state.payload && state.payload.data) {
+          try {
+            destroyCharts();
+            render(computeDashboard(readFilters()));
+          } catch (fallbackErr) {
+            showError(fallbackErr);
+          }
+        } else {
+          showError(err);
+        }
         if (!options.silent) showBusy(false);
-      }
-    }, options.silent ? 0 : 25);
+      })
+      .getDashboardCalc(readFilters());
   }
 
   function readFilters() {
@@ -1233,7 +1266,9 @@
   function showError(err) {
     console.error(err);
     toast('Error: ' + (err && err.message ? err.message : err));
-    renderEmptyShell('No se pudo cargar el dashboard', err && err.message ? err.message : String(err));
+    if (!state.payload) {
+      renderEmptyShell('No se pudo cargar el dashboard', err && err.message ? err.message : String(err));
+    }
   }
 
   function renderEmptyShell(title, body) {

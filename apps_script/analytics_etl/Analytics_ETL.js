@@ -78,6 +78,64 @@ function etlConfigValue_(key, fallback) {
   return fallback || '';
 }
 
+function setTrigalPrivateConfig(config) {
+  var allowed = {
+    TRIGAL_CRM_ID: true,
+    TRIGAL_VENTAS_ID: true
+  };
+  if (!config || typeof config !== 'object') throw new Error('Config invalida');
+  var props = PropertiesService.getScriptProperties();
+  var saved = [];
+  Object.keys(config).forEach(function(key) {
+    if (!allowed[key]) return;
+    var value = String(config[key] || '').trim();
+    if (!value) return;
+    props.setProperty(key, value);
+    saved.push(key);
+  });
+  return { ok: true, saved: saved };
+}
+
+function getTrigalPrivateConfigStatus() {
+  var props = PropertiesService.getScriptProperties();
+  return {
+    ok: true,
+    TRIGAL_CRM_ID: !!props.getProperty('TRIGAL_CRM_ID'),
+    TRIGAL_VENTAS_ID: !!props.getProperty('TRIGAL_VENTAS_ID')
+  };
+}
+
+function etlFuenteConfigId_(tipo, fallback) {
+  if (fallback) return fallback;
+  try {
+    var sh = getSpreadsheetDestino().getSheetByName(CFG.OUT.CONFIG);
+    if (!sh || sh.getLastRow() < 2) return '';
+    var rows = sh.getRange(2, 1, sh.getLastRow() - 1, 7).getValues();
+    var target = String(tipo || '').toUpperCase().trim();
+    for (var i = 0; i < rows.length; i++) {
+      var rowTipo = String(rows[i][0] || '').toUpperCase().trim();
+      var id = String(rows[i][4] || '').trim();
+      var activo = rows[i][6];
+      if (rowTipo === target && id && id.indexOf('PEGAR') === -1 && activo !== false) return id;
+    }
+  } catch (e) {
+    etl_log('WARN', 'etlFuenteConfigId_', 'No se pudo leer CONFIG_FUENTES para ' + tipo + ': ' + e.message);
+  }
+  return '';
+}
+
+function etlCrmSourceId_() {
+  var id = etlFuenteConfigId_('CRM', CFG.CRM_ID);
+  if (!id) throw new Error('Falta configurar TRIGAL_CRM_ID o fila CRM activa en CONFIG_FUENTES.');
+  return id;
+}
+
+function etlVentasSourceId_() {
+  var id = etlFuenteConfigId_('VENTAS', CFG.VENTAS_ID);
+  if (!id) throw new Error('Falta configurar TRIGAL_VENTAS_ID o fila VENTAS activa en CONFIG_FUENTES.');
+  return id;
+}
+
 // ==========================================================================
 // 0. CONFIGURACIÓN GLOBAL
 // ==========================================================================
@@ -1827,7 +1885,7 @@ function runDiagnosticoEmbudo() {
 
   try {
     /* ── 1. Leer FACT_INTERACCIONES crudo ───────────────────────────────── */
-    var ssCrm = SpreadsheetApp.openById(CFG.CRM_ID);
+    var ssCrm = SpreadsheetApp.openById(etlCrmSourceId_());
     var factSh = ssCrm.getSheetByName(CFG.CRM_FACT);
     var factRaw = 0;
     var factConCelularValido = 0;
@@ -1969,7 +2027,7 @@ function runDiagnosticoEmbudo() {
 
 function fase_leerCRM() {
   try {
-    var ss = SpreadsheetApp.openById(CFG.CRM_ID);
+    var ss = SpreadsheetApp.openById(etlCrmSourceId_());
 
     /* ── FACT_INTERACCIONES ─────────────────────────────────────────────── */
     var factSh = ss.getSheetByName(CFG.CRM_FACT);
@@ -2247,7 +2305,7 @@ function fase_stgPresencias(presencias) {
 
 function fase_leerVentas() {
   try {
-    var ss    = SpreadsheetApp.openById(CFG.VENTAS_ID);
+    var ss    = SpreadsheetApp.openById(etlVentasSourceId_());
     var sheet = ss.getSheetByName(CFG.VENTAS_HOJA);
 
     if (!sheet || sheet.getLastRow() < 2) {
@@ -4716,7 +4774,7 @@ function dashboard_leerDimClientes_(norm) {
   norm = norm || dashboardNormalizeDimensionValue_;
   var map = {};
   try {
-    var ss = SpreadsheetApp.openById(CFG.CRM_ID);
+    var ss = SpreadsheetApp.openById(etlCrmSourceId_());
     var sh = ss.getSheetByName(CFG.CRM_DIM);
     if (!sh || sh.getLastRow() < 2) return map;
     var data = sh.getRange(1, 1, sh.getLastRow(), 16).getValues();

@@ -5,7 +5,7 @@
 
 var DASHBOARD_WEB_SNAPSHOT_CACHE_KEY = 'TRIGAL_DASHBOARD_WEB_SNAPSHOT_V6';
 var DASHBOARD_WEB_SNAPSHOT_FILE_ID_KEY = 'TRIGAL_DASHBOARD_WEB_SNAPSHOT_FILE_ID';
-var DASHBOARD_WEB_BOOTSTRAP_CACHE_KEY = 'TRIGAL_DASHBOARD_WEB_BOOTSTRAP_V6';
+var DASHBOARD_WEB_BOOTSTRAP_CACHE_KEY = 'TRIGAL_DASHBOARD_WEB_BOOTSTRAP_V7';
 var DASHBOARD_WEB_BOOTSTRAP_FILE_ID_KEY = 'TRIGAL_DASHBOARD_WEB_BOOTSTRAP_FILE_ID';
 var DASHBOARD_WEB_PAYLOAD_CACHE_KEY = 'TRIGAL_DASHBOARD_WEB_PAYLOAD_V3';
 var DASHBOARD_WEB_PAYLOAD_FILE_ID_KEY = 'TRIGAL_DASHBOARD_WEB_PAYLOAD_FILE_ID_V3';
@@ -17,6 +17,8 @@ var DASHBOARD_WEB_RESPONSE_TTL = 180; // Respuestas agregadas por combinacion de
 var DASHBOARD_WEB_CHUNK_SIZE = 85000;
 var DASHBOARD_WEB_MEMO_SNAPSHOT = null;
 var DASHBOARD_WEB_MEMO_GENERATED_AT = '';
+var DASHBOARD_WEB_MEMO_PAYLOAD = null;
+var DASHBOARD_WEB_MEMO_PAYLOAD_STAMP = '';
 
 function doGet(e) {
   var action = e && e.parameter ? String(e.parameter.action || '').trim() : '';
@@ -58,7 +60,7 @@ function dashboardInclude(filename) {
 
 function getDashboardBootstrap() {
   try {
-    var boot = dashboardLoadBootstrap_();
+    var boot = dashboardEnsureBootstrapFromPayload_(dashboardLoadBootstrap_());
     var filters = boot.filters || [];
     var optionSets = {};
     var meta = {};
@@ -89,6 +91,9 @@ function getDashboardBootstrap() {
       options: options,
       meta: meta,
       health: health,
+      generatedAt: boot.generatedAt || '',
+      snapshotGeneratedAt: boot.generatedAt || '',
+      counts: boot.counts || {},
       defaults: {
         mode: 'COHORTE',
         tipoFecha: 'CAPTACION',
@@ -287,6 +292,661 @@ function getDashboardPayload() {
       defaults: { mode: 'COHORTE', tipoFecha: 'CAPTACION', dateStart: '', dateEnd: '' }
     });
   }
+}
+
+function getDashboardCalc(filters) {
+  filters = filters || {};
+  try {
+    var payload = dashboardLoadWebPayloadObject_();
+    if (!payload || payload.ok === false) {
+      throw new Error((payload && (payload.message || payload.error)) || 'PAYLOAD_WEB_NO_PUBLICADO');
+    }
+    filters = dashboardFastNormalizeFilters_(filters, payload);
+    var responseKey = dashboardResponseCacheKey_(filters, { generatedAt: payload.snapshotGeneratedAt || payload.generatedAt || '' });
+    var cached = dashboardCacheGet_(responseKey);
+    if (cached) {
+      try { return JSON.parse(cached); } catch (e0) {}
+    }
+    var calc = dashboardFastCompute_(payload, filters);
+    dashboardCachePut_(responseKey, JSON.stringify(calc), DASHBOARD_WEB_RESPONSE_TTL);
+    return calc;
+  } catch (e) {
+    return dashboardFastDataError_(filters, e);
+  }
+}
+
+function dashboardLoadWebPayloadObject_() {
+  var raw = dashboardCacheGetChunked_(DASHBOARD_WEB_PAYLOAD_CACHE_KEY);
+  if (!raw) raw = dashboardLoadDriveJsonByProperty_(DASHBOARD_WEB_PAYLOAD_FILE_ID_KEY);
+  if (!raw) return dashboardPayloadNotReady_();
+  var stamp = String(raw.length) + ':' + raw.substring(0, 120);
+  if (DASHBOARD_WEB_MEMO_PAYLOAD && DASHBOARD_WEB_MEMO_PAYLOAD_STAMP === stamp) return DASHBOARD_WEB_MEMO_PAYLOAD;
+  DASHBOARD_WEB_MEMO_PAYLOAD = JSON.parse(raw);
+  DASHBOARD_WEB_MEMO_PAYLOAD_STAMP = stamp;
+  return DASHBOARD_WEB_MEMO_PAYLOAD;
+}
+
+function dashboardFastNormalizeFilters_(filters, payload) {
+  var defaults = (payload && payload.defaults) || {};
+  var out = {
+    mode: String(filters.mode || defaults.mode || 'COHORTE').toUpperCase(),
+    tipoFecha: String(filters.tipoFecha || defaults.tipoFecha || 'CAPTACION').toUpperCase(),
+    dateStart: String(filters.dateStart || defaults.dateStart || ''),
+    dateEnd: String(filters.dateEnd || defaults.dateEnd || ''),
+    fuente: String(filters.fuente || 'TODOS'),
+    proyecto: String(filters.proyecto || 'TODOS'),
+    distrito: String(filters.distrito || 'TODOS'),
+    agente: String(filters.agente || 'TODOS'),
+    etapa: String(filters.etapa || 'TODOS'),
+    tipificacion: String(filters.tipificacion || 'TODOS')
+  };
+  if (out.mode === 'EVENTO' && out.tipoFecha === 'CAPTACION') out.tipoFecha = 'GESTION';
+  return out;
+}
+
+function dashboardFastCompute_(payload, filters) {
+  var data = (payload && payload.data) || {};
+  var isEvento = String(filters.mode || '').toUpperCase() === 'EVENTO';
+  var leads = dashboardFastFilterLeads_(data.leads || [], filters);
+  var allEvents = dashboardFastFilterEvents_(data.events || [], dashboardMerge_(filters, { tipoFecha: 'TODOS' }));
+  var gestionEvents = dashboardFastFilterEvents_(data.events || [], dashboardMerge_(filters, { tipoFecha: 'GESTION' }));
+  var typedEvents = dashboardFastFilterEvents_(data.events || [], filters);
+  var eventRows = filters.tipoFecha && filters.tipoFecha !== 'TODOS' ? typedEvents : allEvents;
+  var kpis = isEvento ? dashboardFastEventKpis_(eventRows, filters.tipoFecha) : dashboardFastLeadKpis_(leads);
+  var sourceQuality = isEvento ? dashboardFastSourceQualityFromEvents_(eventRows, filters.tipoFecha) : dashboardFastSourceQuality_(leads);
+  var districts = (isEvento ? dashboardFastGroupEvents_(eventRows, 'di', filters.tipoFecha) : dashboardFastGroupLeads_(leads, 'di'))
+    .filter(function(r) { return !dashboardFastNoDistrict_(r.label); });
+  var advisors = isEvento ? dashboardFastAdvisorFromEvents_(eventRows, filters.tipoFecha) : dashboardFastAdvisor_(leads);
+  var tipifs = (isEvento ? dashboardFastGroupEvents_(eventRows, 'ti', filters.tipoFecha) : dashboardFastGroupLeads_(leads, 'ti')).slice(0, 12);
+  var funnel = dashboardFastFunnel_(kpis);
+  var callKpis = isEvento
+    ? dashboardFastCallKpisFromEvents_(allEvents, gestionEvents)
+    : dashboardFastCallKpis_(leads, gestionEvents);
+  var callFunnel = dashboardFastCallFunnel_(callKpis);
+  var mainTrend = isEvento ? dashboardFastRowsToTrend_(eventRows) : dashboardFastRowsToLeadTrend_(leads);
+  var alerts = isEvento
+    ? dashboardFastEventAlerts_(kpis, funnel, sourceQuality, districts, filters)
+    : dashboardFastLeadAlerts_(leads, funnel, sourceQuality, districts);
+  return {
+    ok: true,
+    filters: filters,
+    kpis: kpis,
+    callKpis: callKpis,
+    funnel: funnel,
+    callFunnel: callFunnel,
+    trend: isEvento ? mainTrend : dashboardFastRowsToTrend_(allEvents),
+    gestionTrend: dashboardFastRowsToTrend_(gestionEvents),
+    leadTrend: mainTrend,
+    sourceQuality: sourceQuality,
+    districtDemand: districts,
+    advisorPerf: advisors,
+    tipifs: tipifs,
+    sla: isEvento ? dashboardFastSlaFromEvents_(allEvents, gestionEvents) : dashboardFastSla_(leads),
+    followups: isEvento ? dashboardFastFollowupsFromEvents_(gestionEvents) : dashboardFastFollowups_(leads),
+    alerts: alerts,
+    quality: isEvento ? dashboardFastEventQuality_(eventRows) : dashboardFastQuality_(leads),
+    rows: isEvento ? eventRows.length : leads.length,
+    generatedAt: new Date().toISOString(),
+    snapshotGeneratedAt: payload.snapshotGeneratedAt || payload.generatedAt || '',
+    counts: payload.counts || {}
+  };
+}
+
+function dashboardFastFilterLeads_(leads, filters) {
+  var out = [];
+  for (var i = 0; i < leads.length; i++) {
+    var l = leads[i];
+    if (!l.crm) continue;
+    if (!dashboardCompactDateInRange_(dashboardFastDateForLead_(l, filters.tipoFecha), filters.dateStart, filters.dateEnd)) continue;
+    if (!dashboardFastPassDims_(l, filters)) continue;
+    out.push(l);
+  }
+  return out;
+}
+
+function dashboardFastFilterEvents_(events, filters) {
+  var out = [];
+  for (var i = 0; i < events.length; i++) {
+    var r = events[i];
+    if (!dashboardCompactDateInRange_(r.f, filters.dateStart, filters.dateEnd)) continue;
+    if (filters.tipoFecha && filters.tipoFecha !== 'TODOS' && String(r.tf || '') !== String(filters.tipoFecha)) continue;
+    if (!dashboardFastPassDims_(r, filters)) continue;
+    out.push(r);
+  }
+  return out;
+}
+
+function dashboardFastPassDims_(r, filters) {
+  if (!dashboardFastMatch_(r.fu, filters.fuente)) return false;
+  if (!dashboardFastMatch_(r.py, filters.proyecto)) return false;
+  if (!dashboardFastMatch_(r.di, filters.distrito)) return false;
+  if (!dashboardFastMatchAny_([r.as, r.op], filters.agente)) return false;
+  if (!dashboardFastMatch_(r.et || dashboardFastStage_(r), filters.etapa)) return false;
+  if (!dashboardFastMatch_(r.ti, filters.tipificacion)) return false;
+  return true;
+}
+
+function dashboardFastLeadKpis_(rows) {
+  var out = dashboardFastBaseKpis_();
+  out.totalLeads = rows.length;
+  for (var i = 0; i < rows.length; i++) {
+    out.contactables += rows[i].co ? 1 : 0;
+    out.potenciales += rows[i].po ? 1 : 0;
+    out.citas += rows[i].ci ? 1 : 0;
+    out.presencias += rows[i].pp ? 1 : 0;
+    out.tours += rows[i].to ? 1 : 0;
+    out.separaciones += rows[i].se ? 1 : 0;
+    out.procesables += rows[i].pr ? 1 : 0;
+  }
+  return dashboardFastAttachRates_(out);
+}
+
+function dashboardFastEventKpis_(rows, tipoFecha) {
+  var out = dashboardFastBaseKpis_();
+  for (var i = 0; i < rows.length; i++) {
+    out.totalLeads += dashboardFastEventBase_(rows[i], tipoFecha);
+    out.asignados += Number(rows[i].ag || 0);
+    out.gestiones += Number(rows[i].ge || 0);
+    out.contactables += Number(rows[i].co || 0);
+    out.potenciales += Number(rows[i].po || 0);
+    out.citas += Number(rows[i].ci || 0);
+    out.presencias += Number(rows[i].pp || 0);
+    out.tours += Number(rows[i].to || 0);
+    out.separaciones += Number(rows[i].se || 0);
+    out.procesables += Number(rows[i].pr || 0);
+  }
+  return dashboardFastAttachRates_(out);
+}
+
+function dashboardFastBaseKpis_() {
+  return { totalLeads: 0, contactables: 0, potenciales: 0, citas: 0, presencias: 0, tours: 0, separaciones: 0, procesables: 0, gestiones: 0, asignados: 0 };
+}
+
+function dashboardFastAttachRates_(out) {
+  out.leadToCita = dashboardDiv_(out.citas, out.totalLeads);
+  out.leadToSeparacion = dashboardDiv_(out.separaciones, out.totalLeads);
+  out.leadToProcesable = dashboardDiv_(out.procesables, out.totalLeads);
+  out.contactRate = dashboardDiv_(out.contactables, out.totalLeads);
+  out.potentialRate = dashboardDiv_(out.potenciales, out.contactables || out.totalLeads);
+  out.citaToTour = dashboardDiv_(out.tours, out.citas);
+  out.tourToSep = dashboardDiv_(out.separaciones, out.tours);
+  return out;
+}
+
+function dashboardFastFunnel_(kpis) {
+  var stages = [
+    ['Leads', 'totalLeads'], ['Contactables', 'contactables'], ['Potenciales', 'potenciales'],
+    ['Citas reales', 'citas'], ['Presencias', 'presencias'], ['Tours validos', 'tours'],
+    ['Separaciones', 'separaciones'], ['Procesables', 'procesables']
+  ];
+  var out = [];
+  for (var i = 0; i < stages.length; i++) {
+    var value = Number(kpis[stages[i][1]] || 0);
+    var previous = i ? Number(kpis[stages[i - 1][1]] || 0) : value;
+    out.push({ label: stages[i][0], key: stages[i][1], value: value, rate: i ? dashboardDiv_(value, previous) : 1, totalRate: dashboardDiv_(value, kpis.totalLeads) });
+  }
+  return out;
+}
+
+function dashboardFastCallFunnel_(k) {
+  var stages = [
+    ['Asignados', k.asignados], ['Gestionados', k.gestionados], ['Contactados', k.contactables],
+    ['Potenciales', k.potenciales], ['Citas agendadas', k.citas], ['Confirmadas', k.confirmadas]
+  ];
+  var out = [];
+  for (var i = 0; i < stages.length; i++) {
+    var prev = i ? stages[i - 1][1] : stages[i][1];
+    out.push({ label: stages[i][0], value: stages[i][1], rate: i ? dashboardDiv_(stages[i][1], prev) : 1, totalRate: dashboardDiv_(stages[i][1], stages[0][1]) });
+  }
+  return out;
+}
+
+function dashboardFastRowsToTrend_(rows) {
+  var map = {};
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i];
+    if (!r.f) continue;
+    if (!map[r.f]) map[r.f] = { date: r.f, leads: 0, asignaciones: 0, gestiones: 0, citas: 0, presencias: 0, tours: 0, separaciones: 0, procesables: 0, contactables: 0 };
+    map[r.f].leads += Number(r.l || 0);
+    map[r.f].asignaciones += Number(r.ag || 0);
+    map[r.f].gestiones += Number(r.ge || 0);
+    map[r.f].citas += Number(r.ci || 0);
+    map[r.f].presencias += Number(r.pp || 0);
+    map[r.f].tours += Number(r.to || 0);
+    map[r.f].separaciones += Number(r.se || 0);
+    map[r.f].procesables += Number(r.pr || 0);
+    map[r.f].contactables += Number(r.co || 0);
+  }
+  return dashboardFastSortedMap_(map);
+}
+
+function dashboardFastRowsToLeadTrend_(leads) {
+  var map = {};
+  for (var i = 0; i < leads.length; i++) {
+    var l = leads[i];
+    if (!l.fc) continue;
+    if (!map[l.fc]) map[l.fc] = { date: l.fc, leads: 0, contactables: 0, citas: 0, tours: 0, separaciones: 0, procesables: 0 };
+    map[l.fc].leads++;
+    map[l.fc].contactables += l.co ? 1 : 0;
+    map[l.fc].citas += l.ci ? 1 : 0;
+    map[l.fc].tours += l.to ? 1 : 0;
+    map[l.fc].separaciones += l.se ? 1 : 0;
+    map[l.fc].procesables += l.pr ? 1 : 0;
+  }
+  return dashboardFastSortedMap_(map);
+}
+
+function dashboardFastSourceQuality_(leads) {
+  var map = {};
+  for (var i = 0; i < leads.length; i++) {
+    var l = leads[i];
+    var key = l.fu || 'SIN_FUENTE';
+    if (!map[key]) map[key] = { label: key, leads: 0, contactables: 0, potenciales: 0, citas: 0, tours: 0, separaciones: 0, procesables: 0 };
+    map[key].leads++;
+    map[key].contactables += l.co ? 1 : 0;
+    map[key].potenciales += l.po ? 1 : 0;
+    map[key].citas += l.ci ? 1 : 0;
+    map[key].tours += l.to ? 1 : 0;
+    map[key].separaciones += l.se ? 1 : 0;
+    map[key].procesables += l.pr ? 1 : 0;
+  }
+  return dashboardFastFinalizeSource_(map);
+}
+
+function dashboardFastSourceQualityFromEvents_(rows, tipoFecha) {
+  var map = {};
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i];
+    var key = r.fu || 'SIN_FUENTE';
+    if (!map[key]) map[key] = { label: key, leads: 0, contactables: 0, potenciales: 0, citas: 0, tours: 0, separaciones: 0, procesables: 0 };
+    map[key].leads += dashboardFastEventBase_(r, tipoFecha);
+    map[key].contactables += Number(r.co || 0);
+    map[key].potenciales += Number(r.po || 0);
+    map[key].citas += Number(r.ci || 0);
+    map[key].tours += Number(r.to || 0);
+    map[key].separaciones += Number(r.se || 0);
+    map[key].procesables += Number(r.pr || 0);
+  }
+  return dashboardFastFinalizeSource_(map);
+}
+
+function dashboardFastFinalizeSource_(map) {
+  var out = [];
+  for (var key in map) {
+    var r = map[key];
+    r.contactRate = dashboardDiv_(r.contactables, r.leads);
+    r.leadToCita = dashboardDiv_(r.citas, r.leads);
+    r.tourRate = dashboardDiv_(r.tours, r.leads);
+    r.quality = Math.round((r.leadToCita * 55 + dashboardDiv_(r.potenciales, r.leads) * 30 + r.tourRate * 15) * 100);
+    out.push(r);
+  }
+  out.sort(function(a, b) { return b.leads - a.leads; });
+  return out;
+}
+
+function dashboardFastAdvisor_(leads) {
+  var map = {};
+  for (var i = 0; i < leads.length; i++) {
+    var l = leads[i];
+    var key = l.as || l.op || 'SIN_ASESOR';
+    if (!map[key]) map[key] = { label: key, leads: 0, contactables: 0, citas: 0, tours: 0, separaciones: 0, procesables: 0, gestionados: 0 };
+    map[key].leads++;
+    map[key].contactables += l.co ? 1 : 0;
+    map[key].citas += l.ci ? 1 : 0;
+    map[key].tours += l.to ? 1 : 0;
+    map[key].separaciones += l.se ? 1 : 0;
+    map[key].procesables += l.pr ? 1 : 0;
+    map[key].gestionados += l.fg ? 1 : 0;
+  }
+  return dashboardFastFinalizeAdvisor_(map, false);
+}
+
+function dashboardFastAdvisorFromEvents_(rows, tipoFecha) {
+  var map = {};
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i];
+    var key = r.as || r.op || 'SIN_ASESOR';
+    if (!map[key]) map[key] = { label: key, leads: 0, contactables: 0, citas: 0, tours: 0, separaciones: 0, procesables: 0, gestionados: 0 };
+    map[key].leads += dashboardFastEventBase_(r, tipoFecha);
+    map[key].contactables += Number(r.co || 0);
+    map[key].citas += Number(r.ci || 0);
+    map[key].tours += Number(r.to || 0);
+    map[key].separaciones += Number(r.se || 0);
+    map[key].procesables += Number(r.pr || 0);
+    map[key].gestionados += Number(r.ge || 0);
+  }
+  return dashboardFastFinalizeAdvisor_(map, true);
+}
+
+function dashboardFastFinalizeAdvisor_(map, eventMode) {
+  var out = [];
+  for (var key in map) {
+    var r = map[key];
+    r.contactRate = dashboardDiv_(r.contactables, eventMode ? (r.gestionados || r.leads) : r.leads);
+    r.citaRate = dashboardDiv_(r.citas, eventMode ? (r.leads || r.gestionados) : r.leads);
+    r.closeRate = dashboardDiv_(r.separaciones + r.procesables, eventMode ? (r.leads || r.gestionados) : r.leads);
+    out.push(r);
+  }
+  out.sort(function(a, b) { return (b.gestionados + b.citas + b.tours + b.separaciones) - (a.gestionados + a.citas + a.tours + a.separaciones); });
+  return out;
+}
+
+function dashboardFastGroupLeads_(rows, field) {
+  var map = {};
+  for (var i = 0; i < rows.length; i++) {
+    var key = rows[i][field] || 'SIN_DATO';
+    map[key] = (map[key] || 0) + 1;
+  }
+  return dashboardFastGroupMap_(map);
+}
+
+function dashboardFastGroupEvents_(rows, field, tipoFecha) {
+  var map = {};
+  for (var i = 0; i < rows.length; i++) {
+    var key = rows[i][field] || 'SIN_DATO';
+    map[key] = (map[key] || 0) + dashboardFastEventBase_(rows[i], tipoFecha);
+  }
+  return dashboardFastGroupMap_(map);
+}
+
+function dashboardFastGroupMap_(map) {
+  var out = [];
+  for (var key in map) out.push({ label: key, value: map[key] });
+  out.sort(function(a, b) { return b.value - a.value; });
+  return out;
+}
+
+function dashboardFastCallKpis_(leads, gestionEvents) {
+  var asignados = 0, gestionados = 0, contactables = 0, potenciales = 0, citas = 0, confirmadas = 0, pendientes = 0, gestiones = 0;
+  var firstSum = 0, firstCount = 0;
+  for (var i = 0; i < leads.length; i++) {
+    var l = leads[i];
+    asignados += l.ae === 'ASIGNADO' ? 1 : 0;
+    gestionados += (l.fg || l.ti) ? 1 : 0;
+    contactables += l.co ? 1 : 0;
+    potenciales += l.po ? 1 : 0;
+    citas += l.ci ? 1 : 0;
+    confirmadas += String(l.ti || '') === 'CITA CONFIRMADA' ? 1 : 0;
+    pendientes += dashboardFastIsFollowup_(l.ti) ? 1 : 0;
+    if (l.fc && l.fg) {
+      firstSum += Math.max(0, dashboardFastDaysBetween_(l.fc, l.fg));
+      firstCount++;
+    }
+  }
+  for (var g = 0; g < gestionEvents.length; g++) gestiones += Number(gestionEvents[g].ge || 0);
+  var base = gestionados || asignados || leads.length;
+  return {
+    asignados: asignados, gestionados: gestionados, contactables: contactables, potenciales: potenciales,
+    citas: citas, confirmadas: confirmadas, pendientes: pendientes, gestiones: gestiones || gestionados,
+    contactRate: dashboardDiv_(contactables, base),
+    noContactRate: 1 - dashboardDiv_(contactables, base),
+    intentosPromedio: dashboardDiv_(gestiones || gestionados, base),
+    primeraGestionDias: firstCount ? firstSum / firstCount : 0
+  };
+}
+
+function dashboardFastCallKpisFromEvents_(allEvents, gestionEvents) {
+  var asignados = dashboardFastSum_(allEvents, 'ag');
+  var gestionados = dashboardFastSum_(gestionEvents, 'ge');
+  var contactables = dashboardFastSum_(gestionEvents, 'co');
+  var potenciales = dashboardFastSum_(gestionEvents, 'po');
+  var citas = dashboardFastSum_(allEvents, 'ci');
+  var confirmadas = 0, pendientes = 0;
+  for (var i = 0; i < gestionEvents.length; i++) {
+    confirmadas += String(gestionEvents[i].ti || '') === 'CITA CONFIRMADA' ? Number(gestionEvents[i].ge || 0) : 0;
+    pendientes += dashboardFastIsFollowup_(gestionEvents[i].ti) ? Number(gestionEvents[i].ge || 0) : 0;
+  }
+  var base = gestionados || asignados;
+  return {
+    asignados: asignados, gestionados: gestionados, contactables: contactables, potenciales: potenciales,
+    citas: citas, confirmadas: confirmadas, pendientes: pendientes, gestiones: gestionados,
+    contactRate: dashboardDiv_(contactables, base),
+    noContactRate: 1 - dashboardDiv_(contactables, base),
+    intentosPromedio: dashboardDiv_(gestionados, asignados || gestionados),
+    primeraGestionDias: 0
+  };
+}
+
+function dashboardFastSla_(leads) {
+  var out = { sinGestion: 0, criticos: 0, seguimientos: 0, datoFalso: 0 };
+  for (var i = 0; i < leads.length; i++) {
+    var l = leads[i];
+    out.sinGestion += (!l.fg && !l.ti) ? 1 : 0;
+    out.criticos += ((l.po || l.ci) && !l.to && !l.se && !l.pr) ? 1 : 0;
+    out.seguimientos += dashboardFastIsFollowup_(l.ti) ? 1 : 0;
+    out.datoFalso += (l.ti === 'DATO FALSO' || l.ti === 'FUERA DE SERVICIO') ? 1 : 0;
+  }
+  return out;
+}
+
+function dashboardFastSlaFromEvents_(allEvents, gestionEvents) {
+  var asignados = dashboardFastSum_(allEvents, 'ag');
+  var gestionados = dashboardFastSum_(gestionEvents, 'ge');
+  var potenciales = dashboardFastSum_(gestionEvents, 'po');
+  var citas = dashboardFastSum_(allEvents, 'ci');
+  var seguimientos = 0, datoFalso = 0;
+  for (var i = 0; i < gestionEvents.length; i++) {
+    seguimientos += dashboardFastIsFollowup_(gestionEvents[i].ti) ? Number(gestionEvents[i].ge || 0) : 0;
+    datoFalso += Number(gestionEvents[i].df || 0);
+  }
+  return { sinGestion: Math.max(0, asignados - gestionados), criticos: Math.max(0, potenciales - citas), seguimientos: seguimientos, datoFalso: datoFalso };
+}
+
+function dashboardFastFollowups_(leads) {
+  var buckets = [
+    { label: '0 - 24 horas', min: 0, max: 1, value: 0 },
+    { label: '24 - 48 horas', min: 1, max: 2, value: 0 },
+    { label: '48 - 72 horas', min: 2, max: 3, value: 0 },
+    { label: 'Mas de 72 horas', min: 3, max: 999, value: 0 }
+  ];
+  var today = dashboardDateKey_(dashboardToday_());
+  for (var i = 0; i < leads.length; i++) {
+    if (!dashboardFastIsFollowup_(leads[i].ti)) continue;
+    var age = dashboardFastDaysBetween_(leads[i].fg || leads[i].fc, today);
+    for (var b = 0; b < buckets.length; b++) if (age >= buckets[b].min && age < buckets[b].max) buckets[b].value++;
+  }
+  return buckets;
+}
+
+function dashboardFastFollowupsFromEvents_(gestionEvents) {
+  var total = 0;
+  for (var i = 0; i < gestionEvents.length; i++) total += dashboardFastIsFollowup_(gestionEvents[i].ti) ? Number(gestionEvents[i].ge || 0) : 0;
+  return [
+    { label: 'Gestionados hoy', min: 0, max: 1, value: total },
+    { label: '24 - 48 horas', min: 1, max: 2, value: 0 },
+    { label: '48 - 72 horas', min: 2, max: 3, value: 0 },
+    { label: 'Mas de 72 horas', min: 3, max: 999, value: 0 }
+  ];
+}
+
+function dashboardFastQuality_(leads) {
+  var out = { total: leads.length, sinDistrito: 0, sinAsesor: 0, sinTipificacion: 0 };
+  for (var i = 0; i < leads.length; i++) {
+    out.sinDistrito += dashboardFastNoDistrict_(leads[i].di) ? 1 : 0;
+    out.sinAsesor += (!leads[i].as && !leads[i].op) ? 1 : 0;
+    out.sinTipificacion += (!leads[i].ti || leads[i].ti === 'SIN_TIPIFICACION') ? 1 : 0;
+  }
+  return out;
+}
+
+function dashboardFastEventQuality_(rows) {
+  var out = { total: 0, sinDistrito: 0, sinAsesor: 0, sinTipificacion: 0 };
+  for (var i = 0; i < rows.length; i++) {
+    var base = dashboardFastEventBase_(rows[i], 'TODOS');
+    out.total += base;
+    out.sinDistrito += dashboardFastNoDistrict_(rows[i].di) ? base : 0;
+    out.sinAsesor += (!rows[i].as && !rows[i].op) ? base : 0;
+    out.sinTipificacion += (!rows[i].ti || rows[i].ti === 'SIN_TIPIFICACION' || rows[i].ti === 'TODAS') ? base : 0;
+  }
+  return out;
+}
+
+function dashboardFastLeadAlerts_(leads, funnel, sources, districts) {
+  var alerts = [];
+  var k = dashboardFastLeadKpis_(leads);
+  var leak = dashboardFastBiggestLeak_(funnel);
+  if (leak && leak.lost > 0) alerts.push({ type: 'danger', title: 'Mayor fuga: ' + leak.from + ' a ' + leak.to, body: dashboardFastFmtNum_(leak.lost) + ' leads no avanzan. Conversion de etapa: ' + dashboardFastPct_(leak.rate) + '.' });
+  if (k.totalLeads && k.contactRate < 0.45) alerts.push({ type: 'warn', title: 'Contactabilidad bajo el 45%', body: 'Tasa actual: ' + dashboardFastPct_(k.contactRate) + '. Revisar horarios, asignacion y calidad del telefono.' });
+  var topSource = dashboardFastBestSource_(sources);
+  if (topSource) alerts.push({ type: 'good', title: topSource.label + ' tiene mejor calidad', body: 'Lead a cita: ' + dashboardFastPct_(topSource.leadToCita) + ' con ' + dashboardFastFmtNum_(topSource.leads) + ' leads.' });
+  if (districts[0]) alerts.push({ type: 'good', title: districts[0].label + ' concentra demanda valida', body: dashboardFastFmtNum_(districts[0].value) + ' leads con distrito identificado.' });
+  if (!alerts.length) alerts.push({ type: 'good', title: 'Sin alertas criticas', body: 'No se detectan caidas fuertes en el filtro actual.' });
+  return alerts;
+}
+
+function dashboardFastEventAlerts_(k, funnel, sources, districts, filters) {
+  var alerts = [];
+  var label = String(filters.tipoFecha || 'TODOS').toLowerCase();
+  var leak = dashboardFastBiggestLeak_(funnel);
+  if (!k.totalLeads) {
+    alerts.push({ type: 'warn', title: 'Sin actividad para el filtro', body: 'No hay ' + label + ' en el rango seleccionado. Prueba Tipo de evento = GESTION para actividad del call center.' });
+    return alerts;
+  }
+  if (leak && leak.lost > 0) alerts.push({ type: 'warn', title: 'Fuga operativa: ' + leak.from + ' a ' + leak.to, body: dashboardFastFmtNum_(leak.lost) + ' eventos no avanzan en el rango.' });
+  if (k.contactables && k.contactRate < 0.45) alerts.push({ type: 'warn', title: 'Contactabilidad baja en evento real', body: 'Tasa actual: ' + dashboardFastPct_(k.contactRate) + '.' });
+  var topSource = dashboardFastBestSource_(sources);
+  if (topSource) alerts.push({ type: 'good', title: topSource.label + ' lidera el periodo', body: dashboardFastFmtNum_(topSource.leads) + ' eventos con lead a cita de ' + dashboardFastPct_(topSource.leadToCita) + '.' });
+  if (districts[0]) alerts.push({ type: 'good', title: districts[0].label + ' concentra actividad', body: dashboardFastFmtNum_(districts[0].value) + ' eventos con distrito identificado.' });
+  if (!alerts.length) alerts.push({ type: 'good', title: 'Actividad estable', body: 'No se detectan alertas fuertes en evento real.' });
+  return alerts;
+}
+
+function dashboardFastDateForLead_(l, tipo) {
+  tipo = String(tipo || 'CAPTACION').toUpperCase();
+  if (tipo === 'ASIGNACION') return l.fa;
+  if (tipo === 'GESTION') return l.fg;
+  if (tipo === 'CITA') return l.fci;
+  if (tipo === 'PRESENCIA') return l.fp;
+  if (tipo === 'TOUR') return l.ft;
+  if (tipo === 'SEPARACION') return l.fs;
+  if (tipo === 'PROCESABLE') return l.fpr;
+  return l.fc;
+}
+
+function dashboardFastStage_(r) {
+  if (r.pr) return 'PROCESABLE';
+  if (r.se) return 'SEPARACION';
+  if (r.to) return 'TOUR';
+  if (r.pp) return 'PRESENCIA';
+  if (r.ci) return 'CITA';
+  if (r.po) return 'POTENCIAL';
+  if (r.co) return 'CONTACTABLE';
+  if (r.tf) return r.tf;
+  return 'LEAD';
+}
+
+function dashboardFastEventBase_(r, tipoFecha) {
+  var tf = String((tipoFecha && tipoFecha !== 'TODOS') ? tipoFecha : (r && r.tf) || '').toUpperCase();
+  if (tf === 'CAPTACION') return Number(r.l || 0);
+  if (tf === 'ASIGNACION') return Number(r.ag || 0);
+  if (tf === 'GESTION') return Number(r.ge || 0);
+  if (tf === 'CITA') return Number(r.ci || 0);
+  if (tf === 'PRESENCIA') return Number(r.pp || 0);
+  if (tf === 'TOUR') return Number(r.to || 0);
+  if (tf === 'SEPARACION') return Number(r.se || 0);
+  if (tf === 'PROCESABLE') return Number(r.pr || 0);
+  return Number(r.l || 0) + Number(r.ag || 0) + Number(r.ge || 0) + Number(r.ci || 0) + Number(r.pp || 0) + Number(r.to || 0) + Number(r.se || 0) + Number(r.pr || 0);
+}
+
+function dashboardFastMatch_(value, selected) {
+  return !selected || selected === 'TODOS' || String(value || '') === String(selected || '');
+}
+
+function dashboardFastMatchAny_(values, selected) {
+  if (!selected || selected === 'TODOS') return true;
+  for (var i = 0; i < values.length; i++) if (String(values[i] || '') === String(selected)) return true;
+  return false;
+}
+
+function dashboardFastNoDistrict_(value) {
+  var key = dashboardTextKey_(value);
+  return !key || key === 'NO ESPECIFICADO' || key === 'SIN DISTRITO' || key === 'SIN_DISTRITO' || key === 'SIN DATO' || key === 'SIN_DATO';
+}
+
+function dashboardFastIsFollowup_(tipif) {
+  var t = String(tipif || '');
+  return t === 'VOLVER A LLAMAR' || t === 'SEGUIMIENTO' || t === 'INFO. WHATSAPP';
+}
+
+function dashboardFastBiggestLeak_(funnel) {
+  var leak = null;
+  for (var i = 1; i < funnel.length; i++) {
+    var prev = funnel[i - 1], cur = funnel[i];
+    if (!prev.value) continue;
+    var item = { from: prev.label, to: cur.label, rate: dashboardDiv_(cur.value, prev.value), lost: Math.max(0, prev.value - cur.value) };
+    if (!leak || item.rate < leak.rate) leak = item;
+  }
+  return leak;
+}
+
+function dashboardFastBestSource_(rows) {
+  var best = null;
+  for (var i = 0; i < rows.length; i++) {
+    if (rows[i].leads < 5) continue;
+    if (!best || rows[i].leadToCita > best.leadToCita) best = rows[i];
+  }
+  return best;
+}
+
+function dashboardFastSum_(rows, field) {
+  var total = 0;
+  for (var i = 0; i < rows.length; i++) total += Number(rows[i][field] || 0);
+  return total;
+}
+
+function dashboardFastSortedMap_(map) {
+  var keys = Object.keys(map).sort();
+  var out = [];
+  for (var i = 0; i < keys.length; i++) out.push(map[keys[i]]);
+  return out;
+}
+
+function dashboardFastDaysBetween_(a, b) {
+  var da = dashboardFastParseDate_(a);
+  var db = dashboardFastParseDate_(b);
+  if (!da || !db) return 0;
+  return Math.floor((db.getTime() - da.getTime()) / 86400000);
+}
+
+function dashboardFastParseDate_(value) {
+  var p = String(value || '').split('-');
+  if (p.length < 3) return null;
+  var d = new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]));
+  return isNaN(d.getTime()) ? null : d;
+}
+
+function dashboardFastFmtNum_(v) {
+  try { return Number(v || 0).toLocaleString('es-PE'); } catch (e) { return String(v || 0); }
+}
+
+function dashboardFastPct_(v) {
+  return (Number(v || 0) * 100).toFixed(1) + '%';
+}
+
+function dashboardFastDataError_(filters, e) {
+  var kpis = dashboardFastAttachRates_(dashboardFastBaseKpis_());
+  return {
+    ok: false,
+    error: dashboardErrorMessage_(e),
+    filters: filters || {},
+    kpis: kpis,
+    callKpis: { asignados: 0, gestionados: 0, contactables: 0, potenciales: 0, citas: 0, confirmadas: 0, pendientes: 0, gestiones: 0, contactRate: 0, noContactRate: 0, intentosPromedio: 0, primeraGestionDias: 0 },
+    funnel: [],
+    callFunnel: [],
+    trend: [],
+    gestionTrend: [],
+    leadTrend: [],
+    sourceQuality: [],
+    districtDemand: [],
+    advisorPerf: [],
+    tipifs: [],
+    sla: { sinGestion: 0, criticos: 0, seguimientos: 0, datoFalso: 0 },
+    followups: [],
+    alerts: [{ type: 'warn', title: 'No se pudo calcular la vista', body: dashboardErrorMessage_(e) }],
+    quality: { total: 0, sinDistrito: 0, sinAsesor: 0, sinTipificacion: 0 },
+    rows: 0,
+    generatedAt: new Date().toISOString()
+  };
 }
 
 function dashboardPayloadNotReady_() {
@@ -544,7 +1204,17 @@ function dashboardProgramarActualizacionSnapshot_() {
     etl_programarSiguienteCadena('runETL_Completo_Parte5');
     return { ok: true, scheduled: 'runETL_Completo_Parte5', generatedAt: new Date() };
   } catch (e) {
-    return { ok: false, error: dashboardErrorMessage_(e), generatedAt: new Date() };
+    var msg = dashboardErrorMessage_(e);
+    dashboardLog_('WARN', 'dashboardProgramarActualizacionSnapshot_',
+      'No se pudo programar refresh manual; se usara payload vigente. ' + msg);
+    return {
+      ok: true,
+      fallback: true,
+      scheduled: '',
+      warning: msg,
+      message: 'No se pudo programar un refresh manual. Se usara el ultimo payload publicado por el trigger automatico.',
+      generatedAt: new Date()
+    };
   }
 }
 
@@ -972,6 +1642,39 @@ function dashboardBuildBootstrapFromSnapshot_(snapshot) {
     generatedAt: snapshot.generatedAt || '',
     counts: counts,
     filters: filters
+  };
+}
+
+function dashboardEnsureBootstrapFromPayload_(boot) {
+  boot = boot || {};
+  if (boot.source === 'ETL_FAST_PAYLOAD' && (boot.filters || []).length) return boot;
+  try {
+    var payload = dashboardLoadWebPayloadObject_();
+    if (!payload || payload.ok === false || !payload.catalogs) return boot;
+    var next = dashboardBuildBootstrapFromWebPayload_(payload);
+    dashboardSaveBootstrapJson_(JSON.stringify(next));
+    return next;
+  } catch (e) {
+    return boot;
+  }
+}
+
+function dashboardBuildBootstrapFromWebPayload_(payload) {
+  payload = payload || {};
+  var catalogs = payload.catalogs || {};
+  var meta = payload.meta || {};
+  var rows = [];
+  for (var cat in catalogs) {
+    var values = catalogs[cat] || [];
+    for (var i = 0; i < values.length; i++) rows.push({ CATEGORIA: cat, VALOR: values[i], ORDEN: i + 1 });
+  }
+  for (var key in meta) rows.push({ CATEGORIA: key, VALOR: meta[key], ORDEN: 1 });
+  return {
+    version: payload.version || 2,
+    source: 'ETL_FAST_PAYLOAD',
+    generatedAt: payload.snapshotGeneratedAt || payload.generatedAt || '',
+    counts: payload.counts || {},
+    filters: rows
   };
 }
 
@@ -1463,6 +2166,12 @@ function dashboardSaveBootstrapJson_(json) {
 function dashboardSaveWebPayloadJson_(json) {
   dashboardCachePutChunked_(DASHBOARD_WEB_PAYLOAD_CACHE_KEY, json, DASHBOARD_WEB_CACHE_TTL);
   dashboardSaveDriveJsonByProperty_(DASHBOARD_WEB_PAYLOAD_FILE_ID_KEY, 'TRIGAL_DASHBOARD_WEB_PAYLOAD.json', json);
+  try {
+    var payload = JSON.parse(json);
+    dashboardSaveBootstrapJson_(JSON.stringify(dashboardBuildBootstrapFromWebPayload_(payload)));
+  } catch (e) {
+    dashboardLog_('WARN', 'dashboardSaveWebPayloadJson_', 'No se pudo refrescar bootstrap desde payload: ' + dashboardErrorMessage_(e));
+  }
 }
 
 function dashboardSaveDriveJsonByProperty_(propertyKey, fileName, json) {
