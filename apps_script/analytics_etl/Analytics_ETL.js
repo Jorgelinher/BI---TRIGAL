@@ -25,16 +25,18 @@
  *   LOG_ETL              → Historial de ejecuciones del pipeline
  * --------------------------------------------------------------------------
  * LÓGICA DE TIPIFICACIONES (Looker):
- *   Leads               → COUNT DISTINCT CELULAR
+ *   Conteo por etapa    → COUNT DISTINCT CLAVE_CONTEO (recomendado)
+ *   Leads legacy        → COUNT DISTINCT CELULAR (no usar para transacciones de venta)
  *   Contacto No Efectivo→ TIPIF IN ('AP','FS','DF','NC','NEX/FS','BZ','N/A','')
  *   Contacto Efectivo   → TIPIF NOT IN (lista anterior)
  *   Lead Potencial      → TIPIF IN ('CC','VLL','IW','GW','SG','HP','VP','CP','CXC','CZ','NSHOW','ASISTIO')
  *   Citas Agendadas     → del Manifiesto (+ TIPIF IN ('CC','CZ','HP','VP','NSHOW','ASISTIO') como proxy CRM)
  *   Dato Falso (OPC)    → TIPIF = 'DF'
  * --------------------------------------------------------------------------
- * VENTAS SIN CELULAR / SIN MATCH: se cuentan en totales como REFERIDO/SIN CELULAR
- * (DATA_EMBUDO_FULL: ORIGEN_VENTA; RPT_OPC: fila REFERIDO / DIRECTO). Cuando agregues
- * CELULAR en Ventas, el siguiente ETL vinculará por número y dejará de ser referido.
+ * VENTAS SIN CELULAR / SIN MATCH: usan una CLAVE_ENTIDAD sintética estable y se cuentan
+ * por ID_VENTA/CLAVE_CONTEO. DATA_EMBUDO_FULL conserva CELULAR_REAL vacío y marca
+ * ORIGEN_VENTA + MATCH_VENTA_METODO para auditoría. Cuando se agregue el celular,
+ * el siguiente ETL vinculará la venta al lead real sin perder el total transaccional.
  * RECAUDO: columna HOY de Ventas (valor en soles) → RPT_ASESORES RECAUDO_HOY por asesor/mes.
  * --------------------------------------------------------------------------
  * ETL y límite de tiempo (Apps Script ~6 min):
@@ -64,7 +66,8 @@ var ETL_CHAIN_KEYS = {
   UPDATED_TS: 'ETL_CHAIN_UPDATED_TS',
   STEP: 'ETL_CHAIN_STEP',
   EXT_SOURCES_UPDATED_TS: 'ETL_EXT_SOURCES_UPDATED_TS',
-  DASH_TRIGGER_VERSION: 'ETL_DASHBOARD_TRIGGER_VERSION'
+  DASH_TRIGGER_VERSION: 'ETL_DASHBOARD_TRIGGER_VERSION',
+  FULL_TRIGGER_VERSION: 'ETL_FULL_TRIGGER_VERSION'
 };
 
 var ETL_TODAY_END_MS_CACHE = null;
@@ -215,6 +218,8 @@ var CFG = {
     CADENA_SEGUNDOS: 30,
     /** Frecuencia del trigger periodico. El flujo rapido ya no relee manifiestos/ventas en cada corrida. */
     TRIGGER_CADA_MINUTOS: 15,
+    /** Reconstruye DATA_EMBUDO_FULL y reportes pesados mediante la cadena completa. */
+    FULL_TRIGGER_HOURS: 6,
     /** Si una cadena queda con trigger/estado pendiente mas tiempo que esto, se considera colgada y se reinicia. */
     CHAIN_STALE_MINUTES: 45,
     /** Si filas de datos > este umbral, no autoajusta columnas (muy lento en hojas grandes). */
@@ -228,7 +233,8 @@ var CFG = {
     /** ALL evita que el dashboard se quede sin eventos al filtrar dias historicos. */
     DASHBOARD_EVENT_SCOPE: 'ALL',
     /** Versiona la instalacion automatica del trigger rapido. Cambiar si se modifica frecuencia/handler. */
-    DASHBOARD_TRIGGER_VERSION: 'dashboard-fast-v2-20260610'
+    DASHBOARD_TRIGGER_VERSION: 'dashboard-fast-v2-20260610',
+    FULL_TRIGGER_VERSION: 'etl-full-v1-20260620'
   }
 };
 
@@ -250,6 +256,15 @@ function etl_triggerCadaMinutos() {
     if (m <= permitidos[i]) return permitidos[i];
   }
   return Math.max(60, Math.round(m));
+}
+
+function etl_fullTriggerCadaHoras_() {
+  var h = (CFG.ETL && CFG.ETL.FULL_TRIGGER_HOURS != null) ? Number(CFG.ETL.FULL_TRIGGER_HOURS) : 6;
+  var permitidos = [1, 2, 4, 6, 8, 12];
+  for (var i = 0; i < permitidos.length; i++) {
+    if (h <= permitidos[i]) return permitidos[i];
+  }
+  return 12;
 }
 
 function etl_generarTipifDiaEnCadena() {
@@ -390,15 +405,43 @@ function etl_instalarTriggerDashboardRapido_() {
   return cadaMin;
 }
 
+function etl_instalarTriggerCompleto_() {
+  var functionName = 'runETL_Completo_Parte1';
+  var triggers = ScriptApp.getProjectTriggers();
+  for (var i = triggers.length - 1; i >= 0; i--) {
+    if (triggers[i].getHandlerFunction() === functionName) ScriptApp.deleteTrigger(triggers[i]);
+  }
+  var cadaHoras = etl_fullTriggerCadaHoras_();
+  ScriptApp.newTrigger(functionName)
+    .timeBased()
+    .everyHours(cadaHoras)
+    .nearMinute(5)
+    .create();
+  return cadaHoras;
+}
+
 function etl_asegurarTriggerDashboardRapido_() {
   var version = (CFG.ETL && CFG.ETL.DASHBOARD_TRIGGER_VERSION) || 'dashboard-fast';
+  var fullVersion = (CFG.ETL && CFG.ETL.FULL_TRIGGER_VERSION) || 'etl-full';
   try {
     var props = PropertiesService.getScriptProperties();
-    if (props.getProperty(ETL_CHAIN_KEYS.DASH_TRIGGER_VERSION) === version) return;
-    var cadaMin = etl_instalarTriggerDashboardRapido_();
-    props.setProperty(ETL_CHAIN_KEYS.DASH_TRIGGER_VERSION, version);
-    etl_log('INFO', 'etl_asegurarTriggerDashboardRapido_',
-      'Trigger dashboard rapido autoajustado cada ' + cadaMin + ' min | version ' + version);
+    if (props.getProperty(ETL_CHAIN_KEYS.DASH_TRIGGER_VERSION) !== version) {
+      var cadaMin = etl_instalarTriggerDashboardRapido_();
+      props.setProperty(ETL_CHAIN_KEYS.DASH_TRIGGER_VERSION, version);
+      etl_log('INFO', 'etl_asegurarTriggerDashboardRapido_',
+        'Trigger dashboard rapido autoajustado cada ' + cadaMin + ' min | version ' + version);
+    }
+    if (props.getProperty(ETL_CHAIN_KEYS.FULL_TRIGGER_VERSION) !== fullVersion) {
+      var cadaHoras = etl_instalarTriggerCompleto_();
+      ScriptApp.newTrigger('runETL_Completo_Parte1')
+        .timeBased()
+        .after(5 * 60 * 1000)
+        .create();
+      props.setProperty(ETL_CHAIN_KEYS.FULL_TRIGGER_VERSION, fullVersion);
+      etl_log('INFO', 'etl_asegurarTriggerDashboardRapido_',
+        'Trigger ETL completo autoajustado cada ' + cadaHoras + ' h' +
+        ' | reconstruccion inicial en ~5 min | version ' + fullVersion);
+    }
   } catch (e) {
     etl_log('WARN', 'etl_asegurarTriggerDashboardRapido_', e.message);
   }
@@ -1080,7 +1123,9 @@ function etl_leerVentasDesdeSTG() {
   //           ESTADO2(8) FECHA_COMPRA(9) FECHA_PROCESA(10) HOY(11) MEDIO_PAGO(12)
   //           TLMK_RAW(13) TLMK_CANONICO(14) PROMOTORA(15) LINER(16) CLOSER(17)
   //           COMISION(18) MES(19) ORIGEN_RAW(20) ORIGEN_NORM(21) ES_NEGOCIO(22) ES_PROCESABLE(23)
-  var data = sheet.getRange(1, 1, sheet.getLastRow(), 24).getValues();
+  //           ID_VENTA(24) ES_CASH(25) FECHA_SEPARACION(26) FECHA_PROCESABLE(27)
+  var numCols = Math.max(24, sheet.getLastColumn());
+  var data = sheet.getRange(1, 1, sheet.getLastRow(), numCols).getValues();
   for (var i = 1; i < data.length; i++) {
     var r = data[i];
     var cliente = String(r[1] || '').trim().toUpperCase();
@@ -1091,7 +1136,7 @@ function etl_leerVentasDesdeSTG() {
     if (hoyRaw != null && hoyRaw !== '') {
       recaudoVal = parseFloat(String(hoyRaw).replace(/[^0-9.,]/g, '').replace(',', '.')) || 0;
     }
-    rows.push({
+    var venta = {
       n             : r[0],
       cliente       : cliente,
       celular       : String(r[2]  || '').trim(),
@@ -1117,8 +1162,13 @@ function etl_leerVentasDesdeSTG() {
       origen_raw    : String(r[20] || '').trim().toUpperCase(),
       origen_norm   : String(r[21] || '').trim(),
       es_negocio    : (r[22] === true || String(r[22]).toUpperCase() === 'TRUE'),
-      es_procesable : (r[23] === true || String(r[23]).toUpperCase() === 'TRUE')
-    });
+      es_procesable : (r[23] === true || String(r[23]).toUpperCase() === 'TRUE'),
+      id_venta      : numCols > 24 ? String(r[24] || '').trim() : '',
+      es_cash       : numCols > 25 && (r[25] === true || String(r[25]).toUpperCase() === 'TRUE'),
+      fecha_separacion: numCols > 26 ? r[26] : '',
+      fecha_procesable: numCols > 27 ? r[27] : ''
+    };
+    rows.push(ventaEnsureDerivedFields_(venta, i));
   }
   etl_log('INFO','etl_leerVentasDesdeSTG','\u2705 ' + rows.length + ' ventas leídas desde STG');
   return rows;
@@ -2303,6 +2353,53 @@ function fase_stgPresencias(presencias) {
 // FASE 5 — LEER VENTAS
 // ==========================================================================
 
+function ventaEsSeparacion_(modalidad) {
+  var value = String(modalidad || '').trim().toUpperCase();
+  return value === 'SEPARACION' || value === 'SEPARACIÓN';
+}
+
+function ventaEsCash_(modalidad) {
+  return String(modalidad || '').trim().toUpperCase() === 'CASH';
+}
+
+function ventaEsProcesable_(estado2) {
+  var value = String(estado2 || '').trim().toUpperCase();
+  return value === 'PROCESADO' || value === 'PROCESADA' || value === 'PROCESABLE';
+}
+
+function ventaStableId_(venta, rowIndex) {
+  venta = venta || {};
+  var n = String(venta.n || '').trim();
+  if (n) return 'VTA_N_' + n.replace(/[^0-9A-Z_-]/gi, '');
+  var parts = [
+    formatFecha(toDate(venta.fecha_compra)),
+    norm_nombre(venta.cliente || ''),
+    String(venta.proyecto || '').trim().toUpperCase(),
+    String(venta.lote || '').trim().toUpperCase(),
+    String(venta.mz || '').trim().toUpperCase(),
+    String(rowIndex == null ? '' : rowIndex)
+  ];
+  return 'VTA_' + parts.join('_').replace(/[^0-9A-Z_-]/g, '_').replace(/_+/g, '_').substring(0, 160);
+}
+
+function ventaSyntheticEntityKey_(venta, rowIndex) {
+  return 'SIN_CELULAR_' + ventaStableId_(venta, rowIndex);
+}
+
+function ventaEnsureDerivedFields_(venta, rowIndex) {
+  venta = venta || {};
+  venta.id_venta = String(venta.id_venta || ventaStableId_(venta, rowIndex));
+  venta.es_negocio = ventaEsSeparacion_(venta.modalidad);
+  venta.es_cash = ventaEsCash_(venta.modalidad);
+  venta.es_procesable = ventaEsProcesable_(venta.estado2);
+  venta.fecha_separacion = venta.es_negocio ? toDate(venta.fecha_compra) : new Date(0);
+  var fechaProcesa = toDate(venta.fecha_procesa);
+  venta.fecha_procesable = venta.es_procesable
+    ? (etl_isSaneDate_(fechaProcesa) ? fechaProcesa : toDate(venta.fecha_compra))
+    : new Date(0);
+  return venta;
+}
+
 function fase_leerVentas() {
   try {
     var ss    = SpreadsheetApp.openById(etlVentasSourceId_());
@@ -2388,7 +2485,7 @@ function fase_leerVentas() {
       if (hoyRaw != null && hoyRaw !== '') {
         recaudoVal = parseFloat(String(hoyRaw).replace(/[^0-9.,]/g, '').replace(',', '.')) || 0;
       }
-      ventas.push({
+      var venta = {
         n             : r[0],
         cliente       : cliente,
         celular       : celular,
@@ -2413,10 +2510,11 @@ function fase_leerVentas() {
         mes           : String(r[iMes] || '').trim(),
         origen_raw    : origenRaw,
         origen_norm   : origenNorm,
-        // Flags del embudo — incluye variantes con/sin acento
-        es_negocio    : (modalidad === 'SEPARACION' || modalidad === 'SEPARACI\u00d3N'),
-        es_procesable : (estado2   === 'PROCESADO'  || estado2   === 'PROCESADA')
-      });
+        es_negocio    : false,
+        es_cash       : false,
+        es_procesable : false
+      };
+      ventas.push(ventaEnsureDerivedFields_(venta, i));
     }
 
     etl_log('INFO','fase_leerVentas','✅ ' + ventas.length + ' registros de ventas');
@@ -2440,7 +2538,8 @@ function fase_stgVentas(ventas) {
     'N','CLIENTE','CELULAR','MODALIDAD','PROYECTO','LOTE','MZ','PRECIO_VENTA',
     'ESTADO2','FECHA_COMPRA','FECHA_PROCESA','HOY','MEDIO_PAGO',
     'TLMK_RAW','TLMK_CANONICO','PROMOTORA','LINER','CLOSER',
-    'COMISION','MES','ORIGEN_RAW','ORIGEN_NORM','ES_NEGOCIO','ES_PROCESABLE'
+    'COMISION','MES','ORIGEN_RAW','ORIGEN_NORM','ES_NEGOCIO','ES_PROCESABLE',
+    'ID_VENTA','ES_CASH','FECHA_SEPARACION','FECHA_PROCESABLE'
   ];
 
   if (ventas.length === 0) {
@@ -2454,11 +2553,15 @@ function fase_stgVentas(ventas) {
       v.n, v.cliente, v.celular, v.modalidad, v.proyecto, v.lote, v.mz, v.precio_venta,
       v.estado2, v.fecha_compra, v.fecha_procesa, v.hoy, v.medio_pago,
       v.tlmk_raw, v.tlmk_canonico, v.promotora, v.liner, v.closer,
-      v.comision, v.mes, v.origen_raw, v.origen_norm, v.es_negocio, v.es_procesable
+      v.comision, v.mes, v.origen_raw, v.origen_norm, v.es_negocio, v.es_procesable,
+      v.id_venta, v.es_cash, v.fecha_separacion, v.fecha_procesable
     ];
   });
 
   etl_writeTable(sheet, [HEADERS].concat(rows));
+  if (rows.length > 0) {
+    sheet.getRange(2, 27, rows.length, 2).setNumberFormat('yyyy-mm-dd');
+  }
   etl_maybeAutoResizeColumns(sheet, HEADERS.length, rows.length);
   etl_log('INFO','fase_stgVentas','✅ ' + rows.length + ' ventas escritas');
 }
@@ -3091,12 +3194,15 @@ function fase_embudoCompleto(factRows, presencias, ventas, options) {
     });
   }
 
+  var ventaEventos = [];
   for (var v = 0; v < ventas.length; v++) {
     var vta      = ventas[v];
     var nNorm    = norm_nombre(vta.cliente);
     var fVta     = toDate(vta.fecha_compra);
     var vtaProy  = String(vta.proyecto || '').toUpperCase().trim();
     var celMatch = vta.celular || '';
+    var idVenta  = vta.id_venta || ventaStableId_(vta, v);
+    var matchMetodo = celMatch ? 'CELULAR_VENTAS' : '';
 
     if (celMatch && !leadsMap[celMatch]) {
       leadsMap[celMatch] = crearLead(
@@ -3107,7 +3213,10 @@ function fase_embudoCompleto(factRows, presencias, ventas, options) {
       leadsMap[celMatch].isPotencial = true;
       leadsMap[celMatch].isCita = true;
     }
-    if (!celMatch) celMatch = nombreIdx[nNorm];
+    if (!celMatch && nombreIdx[nNorm]) {
+      celMatch = nombreIdx[nNorm];
+      matchMetodo = 'NOMBRE_CRM_MANIFIESTO';
+    }
 
     // Si no hay match directo, buscar en Manifiesto (puente Ventas→Manifiesto→CELULAR)
     // Desempate por: asesor(TLMK), nombre_opc(promotora), fecha, proyecto
@@ -3134,6 +3243,7 @@ function fase_embudoCompleto(factRows, presencias, ventas, options) {
       }
       if (!best) best = candidates[0];
       celMatch = best.celular;
+      matchMetodo = 'MATCH_MANIFIESTO_SCORE';
       if (!leadsMap[celMatch]) {
         var fuenteBest = esFuenteManifiestoPrioritaria(best.fuente_norm) ? best.fuente_norm : '';
         leadsMap[celMatch] = crearLead(best.celular, best.cliente_raw, best.asesor,
@@ -3173,6 +3283,7 @@ function fase_embudoCompleto(factRows, presencias, ventas, options) {
       }
       if (bestFAP) {
         celMatch = bestFAP.celular;
+        matchMetodo = 'MATCH_FECHA_ASESOR_PROYECTO';
         if (!leadsMap[celMatch]) {
           var fuenteFAP = esFuenteManifiestoPrioritaria(bestFAP.fuente_norm) ? bestFAP.fuente_norm : '';
           leadsMap[celMatch] = crearLead(celMatch, vta.cliente, vta.tlmk_canonico,
@@ -3191,40 +3302,61 @@ function fase_embudoCompleto(factRows, presencias, ventas, options) {
     // Ventas sin match (sin CELULAR o sin relación en CRM/Manifiesto): se cuentan igual como REFERIDO/SIN CELULAR.
     // Cuando más adelante agregues el número en Ventas, el ETL vinculará por CELULAR y dejará de ser referido.
     if (!celMatch) {
-      var synthKey = 'VTA_REF_' + v;
-      leadsMap[synthKey] = crearLead('', vta.cliente, vta.tlmk_canonico || '', vtaProy, '', vta.promotora || '', fVta);
+      var synthKey = ventaSyntheticEntityKey_(vta, v);
+      leadsMap[synthKey] = crearLead(synthKey, vta.cliente, vta.tlmk_canonico || '', vtaProy, '', vta.promotora || '', fVta);
+      leadsMap[synthKey].celular_real = '';
+      leadsMap[synthKey].clave_entidad = synthKey;
       leadsMap[synthKey].origen_venta = 'REFERIDO/SIN CELULAR';
       leadsMap[synthKey].isContacto   = true;
       leadsMap[synthKey].isPotencial = true;
       leadsMap[synthKey].isCita       = true;
       celMatch = synthKey;
+      matchMetodo = 'VENTA_SIN_MATCH';
     }
 
     if (celMatch && leadsMap[celMatch]) {
       var leadV = leadsMap[celMatch];
-      if (vta.es_negocio)    leadV.isNegocio    = true;
-      if (vta.es_procesable) leadV.isProcesable  = true;
+      if (!leadV.clave_entidad) leadV.clave_entidad = celMatch;
+      if (!leadV.celular_real && String(celMatch).indexOf('SIN_CELULAR_') !== 0) leadV.celular_real = celMatch;
+      leadV.match_venta_metodo = matchMetodo;
+      if (vta.es_negocio) {
+        leadV.isNegocio = true;
+        if (!leadV.fecha_separacion || fVta < leadV.fecha_separacion) leadV.fecha_separacion = fVta;
+      }
+      if (vta.es_procesable) {
+        leadV.isProcesable = true;
+        var fProcesable = etl_isSaneDate_(toDate(vta.fecha_procesable || vta.fecha_procesa))
+          ? toDate(vta.fecha_procesable || vta.fecha_procesa)
+          : fVta;
+        if (!leadV.fecha_procesable || fProcesable < leadV.fecha_procesable) leadV.fecha_procesable = fProcesable;
+      }
       if (!leadV.fecha_venta || fVta > leadV.fecha_venta) {
         leadV.fecha_venta    = fVta;
         leadV.modalidad_venta = vta.modalidad;
         leadV.tlmk_venta     = vta.tlmk_canonico;
       }
+      ventaEventos.push({
+        id_venta: idVenta,
+        venta: vta,
+        lead_key: celMatch,
+        match_metodo: matchMetodo
+      });
     }
   }
 
   // Log de diagnóstico post-match ventas
-  var _negCount = 0, _procCount = 0, _vtaMatchCount = 0;
+  var _negCount = 0, _procCount = 0, _vtaMatchCount = 0, _vtaSinMatchCount = 0;
   for (var _ck in leadsMap) {
     if (leadsMap[_ck].isNegocio)    _negCount++;
     if (leadsMap[_ck].isProcesable) _procCount++;
   }
-  for (var _vi = 0; _vi < ventas.length; _vi++) {
-    var _vta = ventas[_vi];
-    var _cm = _vta.celular || nombreIdx[norm_nombre(_vta.cliente)] || '';
-    if (_cm && leadsMap[_cm]) _vtaMatchCount++;
+  for (var _vi = 0; _vi < ventaEventos.length; _vi++) {
+    if (ventaEventos[_vi].match_metodo === 'VENTA_SIN_MATCH') _vtaSinMatchCount++;
+    else _vtaMatchCount++;
   }
   etl_log('INFO', 'fase_embudoCompleto',
-    'Post-match ventas: ' + _vtaMatchCount + '/' + ventas.length + ' matches' +
+    'Post-match ventas: ' + _vtaMatchCount + '/' + ventas.length + ' vinculadas' +
+    ' | Sin match: ' + _vtaSinMatchCount +
     ' | Negocios en mapa: ' + _negCount +
     ' | Procesables en mapa: ' + _procCount);
 
@@ -3240,7 +3372,9 @@ function fase_embudoCompleto(factRows, presencias, ventas, options) {
     'FECHA_PRESENCIA','TIPO_PRESENCIA',
     'FECHA_VENTA','MODALIDAD_VENTA','TLMK_VENTA','ORIGEN_VENTA',
     'TIPO_REPORTE_LEAD',     // ASIGNADOS | GESTION (global)
-    'FECHA_ASIGNACION_LEAD'  // fecha primera asignación (Looker: filtrar "asignados en el período")
+    'FECHA_ASIGNACION_LEAD', // fecha primera asignación (Looker: filtrar "asignados en el período")
+    'CLAVE_ENTIDAD','CLAVE_CONTEO','CELULAR_REAL','ID_VENTA',
+    'MATCH_VENTA_METODO','GRANO_REGISTRO','FECHA_ETAPA','CANTIDAD_ETAPA'
   ];
 
   var filas = [HEADERS];
@@ -3250,8 +3384,9 @@ function fase_embudoCompleto(factRows, presencias, ventas, options) {
     var lead = leadsMap[cels[ci]];
     var tipoRptLead = (lead.tieneAsignacion === true) ? 'ASIGNADOS' : 'GESTION';
     var fechaAsigStr = lead.fecha_asignacion ? formatFecha(lead.fecha_asignacion) : '';
+    var claveEntidad = lead.clave_entidad || lead.celular || cels[ci];
     var base = [
-      lead.celular || '',
+      lead.celular || claveEntidad,
       lead.nombre,
       '', 0,                          // ETAPA_EMBUDO y ORDEN_ETAPA (se sobreescriben)
       lead.asesor,
@@ -3268,62 +3403,140 @@ function fase_embudoCompleto(factRows, presencias, ventas, options) {
       lead.tlmk_venta       || '',
       lead.origen_venta     || '',
       tipoRptLead,
-      fechaAsigStr
+      fechaAsigStr,
+      claveEntidad,
+      claveEntidad,
+      lead.celular_real || '',
+      '',
+      lead.match_venta_metodo || '',
+      'LEAD',
+      '',
+      1
     ];
 
     // Etapa 1 — Todos los leads (100%)
-    var r1 = base.slice(); r1[2] = '1. Leads'; r1[3] = 1;
+    var r1 = base.slice(); r1[2] = '1. Leads'; r1[3] = 1; r1[25] = lead.fecha_entrada || '';
     filas.push(r1);
 
     // Etapa 2 — Contactos Efectivos
     if (lead.isContacto) {
-      var r2 = base.slice(); r2[2] = '2. Contactos Efectivos'; r2[3] = 2;
+      var r2 = base.slice(); r2[2] = '2. Contactos Efectivos'; r2[3] = 2; r2[25] = lead.ultima_fecha || '';
       filas.push(r2);
     }
 
     // Etapa 3 — Lead Potencial
     if (lead.isPotencial) {
-      var r3 = base.slice(); r3[2] = '3. Leads Potenciales'; r3[3] = 3;
+      var r3 = base.slice(); r3[2] = '3. Leads Potenciales'; r3[3] = 3; r3[25] = lead.ultima_fecha || '';
       filas.push(r3);
     }
 
     // Etapa 4 — Citas Agendadas (proxy CRM + confirmadas por Manifiesto)
     if (lead.isCita) {
-      var r4 = base.slice(); r4[2] = '4. Citas Agendadas'; r4[3] = 4;
+      var r4 = base.slice(); r4[2] = '4. Citas Agendadas'; r4[3] = 4; r4[25] = lead.fecha_presencia || lead.ultima_fecha || '';
       filas.push(r4);
     }
 
     // Etapa 5 — Presencias Totales (del Manifiesto: Asistió)
     if (lead.isPresencia) {
-      var r5 = base.slice(); r5[2] = '5. Presencias Totales'; r5[3] = 5;
+      var r5 = base.slice(); r5[2] = '5. Presencias Totales'; r5[3] = 5; r5[25] = lead.fecha_presencia || '';
       filas.push(r5);
     }
 
     // Etapa 6 — Presencias Tour Válidas (Resultado = TOUR)
     if (lead.isTour) {
-      var r6 = base.slice(); r6[2] = '6. Presencias Tour (Válidas)'; r6[3] = 6;
+      var r6 = base.slice(); r6[2] = '6. Presencias Tour (Válidas)'; r6[3] = 6; r6[25] = lead.fecha_presencia || '';
       filas.push(r6);
     }
+  }
 
-    // Etapa 7 — Negocios / Separaciones
-    if (lead.isNegocio) {
-      var r7 = base.slice(); r7[2] = '7. Negocios (Separaciones)'; r7[3] = 7;
+  // Etapas 7 y 8 se emiten por transaccion de venta. Asi no se pierden
+  // ventas sin celular ni multiples lotes asociados al mismo cliente.
+  var separacionesEmitidas = 0;
+  var procesablesEmitidos = 0;
+  for (var ve = 0; ve < ventaEventos.length; ve++) {
+    var eventoVenta = ventaEventos[ve];
+    var ventaEvt = eventoVenta.venta;
+    var leadEvt = leadsMap[eventoVenta.lead_key];
+    if (!leadEvt) continue;
+    var entidadEvt = leadEvt.clave_entidad || eventoVenta.lead_key;
+    var tipoRptEvt = leadEvt.tieneAsignacion === true ? 'ASIGNADOS' : 'GESTION';
+    var fechaAsigEvt = leadEvt.fecha_asignacion ? formatFecha(leadEvt.fecha_asignacion) : '';
+    var baseVenta = [
+      leadEvt.celular || entidadEvt,
+      leadEvt.nombre || ventaEvt.cliente || '',
+      '', 0,
+      leadEvt.asesor || ventaEvt.tlmk_canonico || '',
+      leadEvt.proyecto || ventaEvt.proyecto || '',
+      leadEvt.fuente || ventaEvt.origen_norm || '',
+      leadEvt.nombre_opc || ventaEvt.promotora || '',
+      leadEvt.fecha_entrada || toDate(ventaEvt.fecha_compra),
+      leadEvt.ultima_fecha || toDate(ventaEvt.fecha_compra),
+      leadEvt.ultima_tipif || '',
+      leadEvt.fecha_presencia || '',
+      leadEvt.tipo_presencia || '',
+      toDate(ventaEvt.fecha_compra),
+      ventaEvt.modalidad || '',
+      ventaEvt.tlmk_canonico || '',
+      leadEvt.origen_venta || ventaEvt.origen_norm || '',
+      tipoRptEvt,
+      fechaAsigEvt,
+      entidadEvt,
+      '',
+      leadEvt.celular_real || ventaEvt.celular || '',
+      eventoVenta.id_venta,
+      eventoVenta.match_metodo,
+      'VENTA',
+      '',
+      1
+    ];
+
+    if (ventaEvt.es_negocio) {
+      var r7 = baseVenta.slice();
+      r7[2] = '7. Negocios (Separaciones)';
+      r7[3] = 7;
+      r7[20] = eventoVenta.id_venta + '|SEPARACION';
+      r7[25] = toDate(ventaEvt.fecha_separacion || ventaEvt.fecha_compra);
       filas.push(r7);
+      separacionesEmitidas++;
     }
-
-    // Etapa 8 — Procesables / Cierres
-    if (lead.isProcesable) {
-      var r8 = base.slice(); r8[2] = '8. Procesables (Cierres)'; r8[3] = 8;
+    if (ventaEvt.es_procesable) {
+      var r8 = baseVenta.slice();
+      r8[2] = '8. Procesables (Cierres)';
+      r8[3] = 8;
+      r8[20] = eventoVenta.id_venta + '|PROCESABLE';
+      r8[25] = etl_isSaneDate_(toDate(ventaEvt.fecha_procesable || ventaEvt.fecha_procesa))
+        ? toDate(ventaEvt.fecha_procesable || ventaEvt.fecha_procesa)
+        : toDate(ventaEvt.fecha_compra);
       filas.push(r8);
+      procesablesEmitidos++;
     }
+  }
+
+  var separacionesEsperadas = 0;
+  var procesablesEsperados = 0;
+  for (var vr = 0; vr < ventas.length; vr++) {
+    if (ventas[vr].es_negocio) separacionesEsperadas++;
+    if (ventas[vr].es_procesable) procesablesEsperados++;
+  }
+  if (separacionesEmitidas !== separacionesEsperadas || procesablesEmitidos !== procesablesEsperados) {
+    throw new Error(
+      'Reconciliacion DATA_EMBUDO_FULL fallida: separaciones ' + separacionesEmitidas + '/' + separacionesEsperadas +
+      ' | procesables ' + procesablesEmitidos + '/' + procesablesEsperados
+    );
   }
 
   // Escribir sin sheet.clear(): clear() completo es muy lento en hojas grandes.
   etl_writeTable(sheet, filas);
+  if (filas.length > 1) {
+    sheet.getRange(2, 26, filas.length - 1, 1).setNumberFormat('yyyy-mm-dd');
+  }
   etl_maybeAutoResizeColumns(sheet, HEADERS.length, filas.length - 1);
 
   etl_log('INFO','fase_embudoCompleto',
-    '✅ ' + (filas.length - 1) + ' filas en DATA_EMBUDO_FULL (' + cels.length + ' leads únicos) | ' + (Date.now()-t0) + 'ms');
+    '✅ ' + (filas.length - 1) + ' filas en DATA_EMBUDO_FULL (' + cels.length + ' entidades)' +
+    ' | separaciones transaccion: ' + separacionesEmitidas +
+    ' | procesables transaccion: ' + procesablesEmitidos +
+    ' | ' + (Date.now()-t0) + 'ms');
 }
 
 
@@ -4182,6 +4395,8 @@ function etl_today_() {
 function crearLead(celular, nombre, asesor, proyecto, fuente, nombreOpc, fechaEntrada) {
   return {
     celular          : celular || '',
+    celular_real     : celular || '',
+    clave_entidad    : celular || '',
     nombre           : nombre || '',
     asesor           : asesor || '',
     proyecto         : proyecto || '',
@@ -4205,9 +4420,12 @@ function crearLead(celular, nombre, asesor, proyecto, fuente, nombreOpc, fechaEn
     tieneDatoFalso   : false,
     fecha_presencia  : null,
     tipo_presencia   : null,
+    fecha_separacion : null,
+    fecha_procesable : null,
     fecha_venta      : null,
     modalidad_venta  : null,
-    tlmk_venta       : null
+    tlmk_venta       : null,
+    match_venta_metodo: ''
   };
 }
 
@@ -4597,13 +4815,30 @@ function dashboard_buildCompactEventsDirect_(factRows, presencias, ventas, leadB
       asesor_ult_gestion: ventas[v].tlmk_canonico,
       asignado: false
     };
-    if (ventas[v].es_negocio) add(ventas[v].fecha_compra, 'SEPARACION', leadV, '', { se: 1 });
-    if (ventas[v].es_procesable) add(ventas[v].fecha_procesa || ventas[v].fecha_compra, 'PROCESABLE', leadV, '', { pr: 1 });
+    if (ventas[v].es_negocio) add(ventas[v].fecha_separacion || ventas[v].fecha_compra, 'SEPARACION', leadV, '', { se: 1 });
+    if (ventas[v].es_procesable) add(ventas[v].fecha_procesable || ventas[v].fecha_procesa || ventas[v].fecha_compra, 'PROCESABLE', leadV, '', { pr: 1 });
   }
 
   var keys = Object.keys(agg).sort();
   var out = [];
   for (var k = 0; k < keys.length; k++) out.push(agg[keys[k]]);
+  var expectedSep = 0, expectedProc = 0, actualSep = 0, actualProc = 0;
+  for (var ev = 0; ev < ventas.length; ev++) {
+    var sepDateKey = dashboard_fastDateKey_(ventas[ev].fecha_separacion || ventas[ev].fecha_compra);
+    var procDateKey = dashboard_fastDateKey_(ventas[ev].fecha_procesable || ventas[ev].fecha_procesa || ventas[ev].fecha_compra);
+    if (ventas[ev].es_negocio && dashboard_eventDateInPayloadRange_(sepDateKey, defaults)) expectedSep++;
+    if (ventas[ev].es_procesable && dashboard_eventDateInPayloadRange_(procDateKey, defaults)) expectedProc++;
+  }
+  for (var eo = 0; eo < out.length; eo++) {
+    actualSep += Number(out[eo].se || 0);
+    actualProc += Number(out[eo].pr || 0);
+  }
+  if (actualSep !== expectedSep || actualProc !== expectedProc) {
+    throw new Error(
+      'Reconciliacion payload ventas fallida: separaciones ' + actualSep + '/' + expectedSep +
+      ' | procesables ' + actualProc + '/' + expectedProc
+    );
+  }
   etl_log('INFO', 'fase_dashboardCaches',
     'Eventos compactos listos: ' + out.length +
     ' | ' + (Date.now() - phaseStartMs) + 'ms');
@@ -5031,6 +5266,7 @@ function dashboard_applyVentasToLeadCache_(leadByCel, presencias, ventas, alerts
 
   for (var v = 0; v < ventas.length; v++) {
     var venta = ventas[v];
+    var idVenta = venta.id_venta || ventaStableId_(venta, v);
     var celMatch = venta.celular || '';
     var metodo = celMatch ? 'CELULAR_VENTAS' : '';
     var fVta = toDate(venta.fecha_compra);
@@ -5096,7 +5332,7 @@ function dashboard_applyVentasToLeadCache_(leadByCel, presencias, ventas, alerts
     }
 
     if (!celMatch) {
-      var synth = 'VTA_SIN_MATCH_' + v;
+      var synth = ventaSyntheticEntityKey_(venta, v);
       leadByCel[synth] = dashboard_createSyntheticLead_(synth, venta, 'VENTA_SIN_MATCH', norm);
       celMatch = synth;
       metodo = 'VENTA_SIN_MATCH';
@@ -5106,14 +5342,14 @@ function dashboard_applyVentasToLeadCache_(leadByCel, presencias, ventas, alerts
     var lead = leadByCel[celMatch];
     if (!lead) continue;
     lead.match_venta_metodo = metodo;
-    ventaMatches[v] = { celular: celMatch, metodo: metodo };
+    ventaMatches[v] = { celular: celMatch, metodo: metodo, id_venta: idVenta };
     if (venta.es_negocio) {
       lead.tiene_separacion = true;
       dashboard_setMinDate_(lead, 'fecha_separacion', fVta);
     }
     if (venta.es_procesable) {
       lead.tiene_procesable = true;
-      dashboard_setMinDate_(lead, 'fecha_procesable', dashboard_validDate_(toDate(venta.fecha_procesa)) ? toDate(venta.fecha_procesa) : fVta);
+      dashboard_setMinDate_(lead, 'fecha_procesable', dashboard_validDate_(toDate(venta.fecha_procesable || venta.fecha_procesa)) ? toDate(venta.fecha_procesable || venta.fecha_procesa) : fVta);
     }
   }
   return ventaMatches;
@@ -5272,8 +5508,8 @@ function dashboard_writeEventDailyCache_(factRows, presencias, ventas, leadByCel
       fuente: ventas[v].origen_norm, proyecto: ventas[v].proyecto, nombre_opc: ventas[v].promotora,
       asesor_ult_gestion: ventas[v].tlmk_canonico, asignado: false
     };
-    if (ventas[v].es_negocio) add(ventas[v].fecha_compra, 'SEPARACION', leadV, '', { separaciones: 1 });
-    if (ventas[v].es_procesable) add(ventas[v].fecha_procesa || ventas[v].fecha_compra, 'PROCESABLE', leadV, '', { procesables: 1 });
+    if (ventas[v].es_negocio) add(ventas[v].fecha_separacion || ventas[v].fecha_compra, 'SEPARACION', leadV, '', { separaciones: 1 });
+    if (ventas[v].es_procesable) add(ventas[v].fecha_procesable || ventas[v].fecha_procesa || ventas[v].fecha_compra, 'PROCESABLE', leadV, '', { procesables: 1 });
   }
 
   var headers = [
@@ -5654,7 +5890,7 @@ function setup_ArchivoAnalytics() {
     '2. Revisa DIM_ASESORES y ajusta aliases si necesitas.\n\n' +
     '3. Ejecuta "⚡ ETL Completo" del menú Analytics ETL\n' +
     '   para la primera carga de datos.\n\n' +
-    '4. Ejecuta "⏰ Instalar Trigger (30 min)" para automatización.\n\n' +
+    '4. Ejecuta "⏰ Instalar Triggers automáticos" para automatización.\n\n' +
     '5. Conecta este Sheets a Looker Studio y usa:\n' +
     '   • DATA_EMBUDO_FULL  → Embudo general + filtros\n' +
     '   • RPT_ASESORES      → Tabla dinámica por asesor\n' +
@@ -5675,17 +5911,22 @@ function setup_ArchivoAnalytics() {
  */
 function instalar_Triggers() {
   var version = (CFG.ETL && CFG.ETL.DASHBOARD_TRIGGER_VERSION) || 'dashboard-fast';
+  var fullVersion = (CFG.ETL && CFG.ETL.FULL_TRIGGER_VERSION) || 'etl-full';
   etl_limpiarEstadoCadena('reinstalando trigger periodico');
 
   var cadaMin = etl_instalarTriggerDashboardRapido_();
+  var cadaHoras = etl_instalarTriggerCompleto_();
   try {
-    PropertiesService.getScriptProperties().setProperty(ETL_CHAIN_KEYS.DASH_TRIGGER_VERSION, version);
+    var props = PropertiesService.getScriptProperties();
+    props.setProperty(ETL_CHAIN_KEYS.DASH_TRIGGER_VERSION, version);
+    props.setProperty(ETL_CHAIN_KEYS.FULL_TRIGGER_VERSION, fullVersion);
   } catch (e) {}
 
   etl_alertUI(
     '⏰ Trigger instalado',
     'runETL_DashboardRapido se ejecutara automaticamente cada ' + cadaMin + ' minutos.\n\n' +
-    'El dashboard corre STG -> payload web. El ETL completo queda manual para reportes pesados.\n' +
+    'runETL_Completo_Parte1 iniciara la cadena completa cada ' + cadaHoras + ' horas.\n\n' +
+    'El dashboard mantiene baja latencia y DATA_EMBUDO_FULL se reconstruye automaticamente.\n' +
     'Puedes ver los registros de ejecucion en la hoja LOG_ETL.'
   );
 }
@@ -5734,7 +5975,7 @@ function onOpen() {
       .addItem('🏷️  Reporte OPC',                 'ir_a_rpt_opc'))
     .addSeparator()
     .addItem('🏗️  Setup Inicial (primera vez)',   'setup_ArchivoAnalytics')
-    .addItem('⏰ Instalar Trigger Dashboard (30 min)', 'instalar_Triggers')
+    .addItem('⏰ Instalar Triggers automáticos', 'instalar_Triggers')
     .addItem('🔕 Desinstalar Triggers',             'desinstalar_Triggers')
     .addSeparator()
     .addItem('🔄 Limpiar Cache Asesores',           'invalidar_cache_asesores')
